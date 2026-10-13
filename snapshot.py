@@ -87,6 +87,53 @@ def pointer_monitor_rect():
     return g.x * s, g.y * s, g.width * s, g.height * s
 
 
+def show_in_folder(path):
+    """Open the file manager with `path` selected; fall back to opening its folder."""
+    try:
+        subprocess.run(["dbus-send", "--session", "--print-reply", "--dest=org.freedesktop.FileManager1",
+                        "/org/freedesktop/FileManager1", "org.freedesktop.FileManager1.ShowItems",
+                        f"array:string:{GLib.filename_to_uri(path)}", "string:"],
+                       check=True, capture_output=True, timeout=5)
+    except (subprocess.SubprocessError, FileNotFoundError):
+        subprocess.Popen(["xdg-open", os.path.dirname(path)])
+
+
+def notify_saved(summary, path, icon, extra=""):
+    """Saved-file notification whose click opens the file's folder.
+
+    Handled by a detached helper process (`snapshot notify-saved`) because the
+    main process usually exits right after saving and would miss the click.
+    """
+    cmd = [sys.executable, os.path.abspath(__file__), "notify-saved", path, summary, icon, extra]
+    subprocess.Popen(cmd, start_new_session=True, stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def run_notify_saved(path, summary, icon, extra):
+    Notify.init(APP_NAME)
+    loop = GLib.MainLoop()
+    body = path + (f"\n{extra}" if extra else "")
+    n = Notify.Notification.new(summary, body, icon)
+    n.set_hint("desktop-entry", GLib.Variant("s", APP_ID))
+
+    def open_folder(*_):
+        show_in_folder(path)
+        n.close()
+        loop.quit()
+
+    n.add_action("default", "폴더에서 보기", open_folder)
+    n.add_action("open-folder", "폴더에서 보기", open_folder)
+    n.connect("closed", lambda *_: loop.quit())
+    try:
+        n.show()
+    except GLib.Error:
+        return 1
+    # The notification stays in the message tray; give up after a while.
+    GLib.timeout_add_seconds(30 * 60, loop.quit)
+    loop.run()
+    return 0
+
+
 def notify(summary, body="", icon="camera-photo"):
     try:
         n = Notify.Notification.new(summary, body, icon)
@@ -419,7 +466,7 @@ class PreviewWindow(Gtk.Window):
             return
         self.saved = path
         print(path, flush=True)
-        notify("스크린샷을 저장했습니다", path, "camera-photo")
+        notify_saved("스크린샷을 저장했습니다", path, "camera-photo")
         if close:
             self.destroy()
 
@@ -1016,7 +1063,7 @@ class VideoPreviewWindow(Gtk.Window):
     def finish_save(self, path):
         self.saved = True
         print(path, flush=True)
-        notify("화면 녹화를 저장했습니다", path, "video-x-generic")
+        notify_saved("화면 녹화를 저장했습니다", path, "video-x-generic")
         self.destroy()
 
     def on_destroy(self, *_):
@@ -1120,8 +1167,8 @@ class App:
         else:
             pixbuf.savev(path, "png", [], [])
             self.report(path)
-            notify("스크린샷을 저장했습니다",
-                   f"{path}\n클립보드에도 복사되었습니다." if clipboard else path, "camera-photo")
+            notify_saved("스크린샷을 저장했습니다", path, "camera-photo",
+                         "클립보드에도 복사되었습니다." if clipboard else "")
         if not (clipboard or preview):
             self.quit(0)
             return
@@ -1293,7 +1340,7 @@ class App:
                     self.quit(1)
                     return
             print(self.rec_target)
-            notify("화면 녹화를 저장했습니다", self.rec_target, "video-x-generic")
+            notify_saved("화면 녹화를 저장했습니다", self.rec_target, "video-x-generic")
             self.quit(0)
 
 
@@ -1623,6 +1670,11 @@ def parse_args(argv):
     rec.add_argument("--no-preview", action="store_true", help="save directly without the preview window")
 
     sub.add_parser("stop", help="stop the running screencast")
+    ns = sub.add_parser("notify-saved", help=argparse.SUPPRESS)
+    ns.add_argument("path")
+    ns.add_argument("summary")
+    ns.add_argument("icon")
+    ns.add_argument("extra", nargs="?", default="")
     sub.add_parser("toggle-record", help="stop if recording, otherwise open the dialog in screencast mode")
     return p.parse_args(argv)
 
@@ -1645,6 +1697,9 @@ def detach():
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
     cmd = args.cmd or "ui"
+
+    if cmd == "notify-saved":
+        return run_notify_saved(args.path, args.summary, args.icon, args.extra)
 
     if cmd in ("stop", "toggle-record"):
         pid = read_pid()
