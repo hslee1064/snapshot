@@ -412,9 +412,6 @@ class PreviewWindow(Gtk.Window):
         actions.pack_end(self.save_btn, False, False, 0)
         box.pack_start(actions, False, False, 0)
 
-        hint = Gtk.Label(label="Enter/Ctrl+S 저장 · Esc 저장 안 하고 닫기")
-        hint.get_style_context().add_class("dim-label")
-        box.pack_start(hint, False, False, 0)
         self.save_btn.grab_focus()
 
     def on_key(self, _w, event):
@@ -781,9 +778,6 @@ class CaptureDialog(Gtk.Window):
         self.capture_btn.connect("clicked", self.on_capture)
         box.pack_start(self.capture_btn, False, False, 0)
 
-        hint = Gtk.Label(label="Enter 캡처 · S/C/W 대상 · V 모드 전환 · Esc 닫기")
-        hint.get_style_context().add_class("dim-label")
-        box.pack_start(hint, False, False, 0)
         self.sync()
 
     def sync(self):
