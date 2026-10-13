@@ -540,6 +540,15 @@ class RecordingIndicator:
             self.conn = None
 
 
+def make_click_through(window):
+    """Give a window an empty input shape so clicks reach the windows below.
+
+    Set on the widget (not the GdkWindow): GTK re-applies its own input shape to
+    RGBA toplevels when they are mapped, which would otherwise cover the whole area.
+    """
+    window.input_shape_combine_region(cairo.Region())
+
+
 class CountdownWindow(Gtk.Window):
     """Big round countdown shown in the middle of the monitor under the pointer."""
 
@@ -564,7 +573,7 @@ class CountdownWindow(Gtk.Window):
             x, y, w, h = geo.x, geo.y, geo.width, geo.height
         self.move(int(x + (w - self.SIZE) / 2), int(y + (h - self.SIZE) / 2))
         self.connect("draw", self.on_draw)
-        self.connect("realize", lambda *_: self.get_window().input_shape_combine_region(cairo.Region(), 0, 0))
+        make_click_through(self)
 
     def on_draw(self, _w, cr):
         r = self.SIZE / 2
@@ -674,11 +683,7 @@ class RecordingFrame(Gtk.Window):
         self.move(0, 0)
         self.set_default_size(w // self.scale, h // self.scale)
         self.connect("draw", self.on_draw)
-        self.connect("realize", self.on_realize)
-
-    def on_realize(self, *_):
-        # An empty input shape lets every click fall through to the windows below.
-        self.get_window().input_shape_combine_region(cairo.Region(), 0, 0)
+        make_click_through(self)
 
     def on_draw(self, _w, cr):
         s = self.scale
