@@ -139,6 +139,12 @@ def visible_windows():
     return result
 
 
+def gif_command(src, dst, fps=15, max_width=1280):
+    vf = (f"fps={fps},scale='min({max_width},iw)':-2:flags=lanczos,split[a][b];"
+          "[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle")
+    return ["ffmpeg", "-loglevel", "error", "-y", "-i", src, "-vf", vf, "-loop", "0", dst]
+
+
 def clamp_rect(rect, width, height):
     x, y, w, h = rect
     x2, y2 = min(x + w, width), min(y + h, height)
@@ -653,6 +659,7 @@ class VideoPreviewWindow(Gtk.Window):
         self.set_keep_above(True)
         self.set_icon_name(APP_ID)
         self.connect("destroy", self.on_destroy)
+        self.connect("delete-event", lambda *_: self.converting)  # block close while converting
         self.connect("key-press-event", self.on_key)
 
         w, h = size
@@ -694,18 +701,30 @@ class VideoPreviewWindow(Gtk.Window):
         box.pack_start(controls, False, False, 0)
 
         actions = Gtk.Box(spacing=8)
-        name = Gtk.Label(label=os.path.basename(target_path), selectable=True)
-        name.set_ellipsize(2)  # Pango.EllipsizeMode.MIDDLE
-        actions.set_center_widget(name)
-        save = Gtk.Button(label="저장")
-        save.get_style_context().add_class("suggested-action")
-        save.connect("clicked", lambda *_: self.save_as())
-        actions.pack_end(save, False, False, 0)
+        self.name_label = Gtk.Label(selectable=True)
+        self.name_label.set_ellipsize(2)  # Pango.EllipsizeMode.MIDDLE
+        actions.set_center_widget(self.name_label)
+        self.save_btn = Gtk.Button(label="저장")
+        self.save_btn.get_style_context().add_class("suggested-action")
+        self.save_btn.connect("clicked", lambda *_: self.save_as())
+        actions.pack_end(self.save_btn, False, False, 0)
+        # Output format; GIF is converted from the MP4 when saving.
+        fmt_box = Gtk.Box()
+        fmt_box.get_style_context().add_class("linked")
+        self.mp4_btn = Gtk.RadioButton.new_with_label_from_widget(None, "MP4")
+        self.gif_btn = Gtk.RadioButton.new_with_label_from_widget(self.mp4_btn, "GIF")
+        for btn in (self.mp4_btn, self.gif_btn):
+            btn.set_mode(False)
+            fmt_box.pack_start(btn, False, False, 0)
+        self.gif_btn.connect("toggled", lambda *_: self.update_name())
+        actions.pack_end(fmt_box, False, False, 0)
         box.pack_start(actions, False, False, 0)
+        self.update_name()
 
         self.duration = 0
         self.at_end = False
         self.pending_seek = None
+        self.converting = False
         self.set_playing(True)
         self.progress_timer = GLib.timeout_add(100, self.update_progress)
 
@@ -772,7 +791,8 @@ class VideoPreviewWindow(Gtk.Window):
         ctrl = event.state & Gdk.ModifierType.CONTROL_MASK
         key = Gdk.keyval_to_lower(event.keyval)
         if key == Gdk.KEY_Escape:
-            self.destroy()
+            if not self.converting:
+                self.destroy()
         elif key == Gdk.KEY_space:
             self.toggle_play()
         elif key in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) or (ctrl and key == Gdk.KEY_s):
@@ -781,27 +801,60 @@ class VideoPreviewWindow(Gtk.Window):
             return False
         return True
 
+    def ext(self):
+        return ".gif" if self.gif_btn.get_active() else ".mp4"
+
+    def default_name(self):
+        return os.path.splitext(os.path.basename(self.target_path))[0] + self.ext()
+
+    def update_name(self):
+        self.name_label.set_text(self.default_name())
+
     def save_as(self):
+        if self.converting:
+            return
         self.set_playing(False)
         dialog = Gtk.FileChooserDialog(title="화면 녹화 저장", parent=self, action=Gtk.FileChooserAction.SAVE)
         dialog.add_buttons("취소", Gtk.ResponseType.CANCEL, "저장", Gtk.ResponseType.ACCEPT)
         dialog.set_do_overwrite_confirmation(True)
         os.makedirs(os.path.dirname(self.target_path), exist_ok=True)
         dialog.set_current_folder(os.path.dirname(self.target_path))
-        dialog.set_current_name(os.path.basename(self.target_path))
+        dialog.set_current_name(self.default_name())
         response = dialog.run()
         path = dialog.get_filename()
         dialog.destroy()
         if response != Gtk.ResponseType.ACCEPT or not path:
             return
-        if not path.lower().endswith(".mp4"):
-            path += ".mp4"
+        if not path.lower().endswith((".mp4", ".gif")):
+            path += self.ext()
+        if path.lower().endswith(".gif"):
+            self.convert_gif(path)
+            return
         self.player.set_state(self.Gst.State.NULL)
         try:
             shutil.move(self.temp_path, path)
         except OSError as exc:
             self.header.set_subtitle(f"저장 실패: {exc}")
             return
+        self.finish_save(path)
+
+    def convert_gif(self, path):
+        """Convert in the background with a generated palette for decent colours."""
+        self.converting = True
+        self.save_btn.set_sensitive(False)
+        self.header.set_subtitle("GIF로 변환하는 중…")
+        proc = subprocess.Popen(gif_command(self.temp_path, path), stdin=subprocess.DEVNULL)
+
+        def done(_pid, status):
+            self.converting = False
+            if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0 and os.path.exists(path):
+                self.finish_save(path)
+            else:
+                self.save_btn.set_sensitive(True)
+                self.header.set_subtitle("GIF 변환에 실패했습니다")
+        GLib.child_watch_add(GLib.PRIORITY_DEFAULT, proc.pid, done)
+
+    def finish_save(self, path):
         self.saved = True
         print(path, flush=True)
         notify("화면 녹화를 저장했습니다", path, "video-x-generic")
@@ -975,6 +1028,9 @@ class App:
             os.makedirs(cache, exist_ok=True)
             fd, path = tempfile.mkstemp(prefix="recording-", suffix=".mp4", dir=cache)
             os.close(fd)
+        elif self.rec_target.lower().endswith(".gif"):
+            fd, path = tempfile.mkstemp(prefix="recording-", suffix=".mp4")
+            os.close(fd)
         else:
             path = self.rec_target
         cmd = ["ffmpeg", "-loglevel", "error", "-y",
@@ -1044,8 +1100,15 @@ class App:
             VideoPreviewWindow(self.rec_path, self.rec_target, self.rec_size,
                                lambda: self.preview_closed()).show_all()
         else:
-            print(self.rec_path)
-            notify("화면 녹화를 저장했습니다", self.rec_path, "video-x-generic")
+            if self.rec_path != self.rec_target:
+                ok = subprocess.run(gif_command(self.rec_path, self.rec_target)).returncode == 0
+                os.unlink(self.rec_path)
+                if not ok:
+                    notify(APP_NAME, "GIF 변환에 실패했습니다.", "dialog-error")
+                    self.quit(1)
+                    return
+            print(self.rec_target)
+            notify("화면 녹화를 저장했습니다", self.rec_target, "video-x-generic")
             self.quit(0)
 
 

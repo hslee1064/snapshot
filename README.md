@@ -4,7 +4,7 @@ Ubuntu 24.04 기본 스크린샷 도구와 같은 기능을 하는 캡처 도구
 
 - **대상**: 선택 영역 / 창 / 화면(포인터가 있는 모니터) / 전체(모든 모니터, CLI `all`)
 - **스크린샷**: PNG로 `~/Pictures/Screenshots/`에 저장, 클립보드 복사, 캡처 후 미리보기 창에서 "저장"(위치 지정) 또는 Esc(저장 안 함), 클립보드 자동 복사, 끌어다 놓기
-- **화면 녹화**: 녹화 중 선택 영역 밖은 어둡게 표시, 종료 후 미리보기 창에서 재생·일시정지·탐색 막대·"저장"(위치 지정, MP4),
+- **화면 녹화**: 녹화 중 선택 영역 밖은 어둡게 표시, 종료 후 미리보기 창에서 재생·일시정지·탐색 막대, MP4/GIF 선택 후 "저장"(위치 지정),
   녹화 중에는 상단 표시줄에 🔴 경과 시간이 표시되고, 클릭하거나 Esc를 누르면 중지
 
 ## 설치
@@ -21,7 +21,7 @@ Ubuntu 24.04 기본 스크린샷 도구와 같은 기능을 하는 캡처 도구
 |---|---|
 | `snapshot` | 캡처 창 열기 (S/C/W 대상, V 모드 전환, Enter 캡처) |
 | `snapshot shot area\|window\|screen\|all [-p] [-d 초] [-o 파일] [--no-preview]` | 스크린샷 |
-| `snapshot record area\|window\|screen\|all [-a] [--no-pointer] [--fps 30]` | 녹화 시작 |
+| `snapshot record area\|window\|screen\|all [-a] [--no-pointer] [--fps 30] [-o 파일.mp4\|.gif] [--no-preview]` | 녹화 시작 |
 | `snapshot stop` | 녹화 중지 |
 | `snapshot toggle-record` | 녹화 중이면 중지, 아니면 녹화 모드로 창 열기 |
 
