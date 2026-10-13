@@ -405,42 +405,25 @@ class PreviewWindow(Gtk.Window):
         frame.connect("drag-data-get", lambda _w, _c, data, *_: data.set_uris([GLib.filename_to_uri(self.drag_file())]))
         box.pack_start(frame, True, True, 0)
 
-        self.info = Gtk.Label(label=f"저장 위치: {path}", xalign=0, selectable=True)
-        self.info.set_ellipsize(3)  # Pango.EllipsizeMode.END
-        self.info.get_style_context().add_class("dim-label")
-        box.pack_start(self.info, False, False, 0)
-
         actions = Gtk.Box(spacing=8)
-        for label, cb in (("복사", self.copy), ("다른 이름으로 저장…", self.save_as)):
-            btn = Gtk.Button(label=label)
-            btn.connect("clicked", lambda _b, f=cb: f())
-            actions.pack_start(btn, False, False, 0)
-        self.save_btn = Gtk.Button(label="파일로 저장")
+        self.save_btn = Gtk.Button(label="저장")
         self.save_btn.get_style_context().add_class("suggested-action")
-        self.save_btn.connect("clicked", lambda *_: self.save(self.path, close=True))
-        discard = Gtk.Button(label="닫기")
-        discard.connect("clicked", lambda *_: self.destroy())
+        self.save_btn.connect("clicked", lambda *_: self.save_as())
         actions.pack_end(self.save_btn, False, False, 0)
-        actions.pack_end(discard, False, False, 0)
         box.pack_start(actions, False, False, 0)
 
-        hint = Gtk.Label(label="Enter/Ctrl+S 파일로 저장 · Ctrl+Shift+S 다른 이름으로 · Ctrl+C 복사 · Esc 저장 안 하고 닫기")
+        hint = Gtk.Label(label="Enter/Ctrl+S 저장 · Esc 저장 안 하고 닫기")
         hint.get_style_context().add_class("dim-label")
         box.pack_start(hint, False, False, 0)
         self.save_btn.grab_focus()
 
     def on_key(self, _w, event):
         ctrl = event.state & Gdk.ModifierType.CONTROL_MASK
-        shift = event.state & Gdk.ModifierType.SHIFT_MASK
         key = Gdk.keyval_to_lower(event.keyval)
         if key == Gdk.KEY_Escape:
             self.destroy()
-        elif key in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) or (ctrl and key == Gdk.KEY_s and not shift):
-            self.save(self.path, close=True)
-        elif ctrl and key == Gdk.KEY_s:
+        elif key in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) or (ctrl and key == Gdk.KEY_s):
             self.save_as()
-        elif ctrl and key == Gdk.KEY_c:
-            self.copy()
         else:
             return False
         return True
@@ -450,7 +433,7 @@ class PreviewWindow(Gtk.Window):
             os.makedirs(os.path.dirname(path), exist_ok=True)
             self.pixbuf.savev(path, "png", [], [])
         except (GLib.Error, OSError) as exc:
-            self.info.set_text(f"저장 실패: {exc}")
+            self.header.set_subtitle(f"저장 실패: {exc}")
             return
         self.saved = path
         print(path, flush=True)
@@ -480,12 +463,6 @@ class PreviewWindow(Gtk.Window):
         path = os.path.join(folder, os.path.basename(self.path))
         self.pixbuf.savev(path, "png", [], [])
         return path
-
-    def copy(self):
-        cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
-        cb.set_image(self.pixbuf)
-        cb.store()
-        self.header.set_subtitle(f"{self.pixbuf.get_width()} × {self.pixbuf.get_height()}  ·  클립보드에 복사됨")
 
 
 # ---------------------------------------------------------------------------
