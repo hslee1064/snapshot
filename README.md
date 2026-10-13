@@ -3,7 +3,7 @@
 Ubuntu 24.04 기본 스크린샷 도구와 같은 기능을 하는 캡처 도구입니다 (X11 세션 전용).
 
 - **대상**: 선택 영역 / 창 / 화면(포인터가 있는 모니터) / 전체(모든 모니터, CLI `all`)
-- **스크린샷**: PNG로 `~/Pictures/Screenshots/`에 저장하고 클립보드에 복사
+- **스크린샷**: PNG로 `~/Pictures/Screenshots/`에 저장, 클립보드 복사, 결과 미리보기 창(열기·폴더에서 보기·복사·삭제, 끌어다 놓기)
 - **화면 녹화**: MP4(H.264, 선택 시 시스템 소리 AAC)로 `~/Videos/Screencasts/`에 저장,
   녹화 중에는 상단 표시줄 아이콘에 경과 시간이 표시되고 메뉴에서 중지
 
@@ -20,7 +20,7 @@ Ubuntu 24.04 기본 스크린샷 도구와 같은 기능을 하는 캡처 도구
 | 명령 | 동작 |
 |---|---|
 | `snapshot` | 캡처 창 열기 (S/C/W 대상, V 모드 전환, Enter 캡처) |
-| `snapshot shot area\|window\|screen\|all [-p] [-d 초] [-o 파일]` | 스크린샷 |
+| `snapshot shot area\|window\|screen\|all [-p] [-d 초] [-o 파일] [--no-preview]` | 스크린샷 |
 | `snapshot record area\|window\|screen\|all [-a] [--no-pointer] [--fps 30]` | 녹화 시작 |
 | `snapshot stop` | 녹화 중지 |
 | `snapshot toggle-record` | 녹화 중이면 중지, 아니면 녹화 모드로 창 열기 |

@@ -23,7 +23,7 @@ gi.require_version("Gdk", "3.0")
 gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Wnck", "3.0")
 gi.require_version("Notify", "0.7")
-from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, Notify, Wnck  # noqa: E402
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Notify, Wnck  # noqa: E402
 
 try:
     gi.require_version("AyatanaAppIndicator3", "0.1")
@@ -362,13 +362,130 @@ class SelectionOverlay(Gtk.Window):
 
 
 # ---------------------------------------------------------------------------
+# Screenshot preview
+# ---------------------------------------------------------------------------
+
+class PreviewWindow(Gtk.Window):
+    """Shows the captured image with quick actions, like GNOME's screenshot result."""
+
+    MAX_W, MAX_H = 960, 640
+
+    def __init__(self, pixbuf, path, copied, on_close):
+        super().__init__(title="스크린샷")
+        self.pixbuf = pixbuf
+        self.path = path
+        self.on_close = on_close
+        self.set_position(Gtk.WindowPosition.CENTER)
+        self.set_keep_above(True)
+        self.set_icon_name("applets-screenshooter")
+        self.connect("destroy", lambda *_: self.on_close())
+        self.connect("key-press-event", self.on_key)
+
+        header = Gtk.HeaderBar(title="스크린샷을 저장했습니다", show_close_button=True)
+        header.set_subtitle("클립보드에 복사됨" if copied else os.path.basename(path))
+        self.set_titlebar(header)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.set_border_width(12)
+        self.add(box)
+
+        w, h = pixbuf.get_width(), pixbuf.get_height()
+        ratio = min(self.MAX_W / w, self.MAX_H / h, 1.0)
+        thumb = pixbuf.scale_simple(max(int(w * ratio), 1), max(int(h * ratio), 1),
+                                    GdkPixbuf.InterpType.BILINEAR)
+        image = Gtk.Image.new_from_pixbuf(thumb)
+        frame = Gtk.EventBox()
+        frame.add(image)
+        frame.set_tooltip_text("더블클릭하면 이미지 뷰어로 엽니다 · 끌어다 놓기 가능")
+        frame.connect("button-press-event", self.on_image_click)
+        # Drag the file out into other apps (chat, browser, file manager).
+        frame.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, [], Gdk.DragAction.COPY)
+        frame.drag_source_add_uri_targets()
+        frame.drag_source_set_icon_pixbuf(thumb.scale_simple(
+            max(thumb.get_width() // 4, 1), max(thumb.get_height() // 4, 1), GdkPixbuf.InterpType.BILINEAR))
+        frame.connect("drag-data-get", lambda _w, _c, data, *_: data.set_uris([GLib.filename_to_uri(path)]))
+        box.pack_start(frame, True, True, 0)
+
+        info = Gtk.Label(label=f"{path}  ·  {w} × {h}", xalign=0, selectable=True)
+        info.set_ellipsize(3)  # Pango.EllipsizeMode.END
+        info.get_style_context().add_class("dim-label")
+        box.pack_start(info, False, False, 0)
+
+        actions = Gtk.Box(spacing=8)
+        for label, cb in (("열기", self.open_image), ("폴더에서 보기", self.open_folder),
+                          ("복사", self.copy), ("삭제", self.delete)):
+            btn = Gtk.Button(label=label)
+            btn.connect("clicked", lambda _b, f=cb: f())
+            actions.pack_start(btn, False, False, 0)
+        close = Gtk.Button(label="닫기")
+        close.get_style_context().add_class("suggested-action")
+        close.connect("clicked", lambda *_: self.destroy())
+        actions.pack_end(close, False, False, 0)
+        box.pack_start(actions, False, False, 0)
+        close.grab_focus()
+
+    def on_image_click(self, _w, event):
+        if event.type == Gdk.EventType.DOUBLE_BUTTON_PRESS:
+            self.open_image()
+
+    def on_key(self, _w, event):
+        if event.keyval == Gdk.KEY_Escape:
+            self.destroy()
+        elif event.keyval == Gdk.KEY_c and event.state & Gdk.ModifierType.CONTROL_MASK:
+            self.copy()
+        elif event.keyval == Gdk.KEY_Delete:
+            self.delete()
+        else:
+            return False
+        return True
+
+    def open_image(self):
+        subprocess.Popen(["xdg-open", self.path])
+        self.destroy()
+
+    def open_folder(self):
+        # Ask the file manager to select the file; fall back to opening the folder.
+        try:
+            subprocess.run(["dbus-send", "--session", "--print-reply", "--dest=org.freedesktop.FileManager1",
+                            "/org/freedesktop/FileManager1", "org.freedesktop.FileManager1.ShowItems",
+                            f"array:string:{GLib.filename_to_uri(self.path)}", "string:"],
+                           check=True, capture_output=True, timeout=5)
+        except (subprocess.SubprocessError, FileNotFoundError):
+            subprocess.Popen(["xdg-open", os.path.dirname(self.path)])
+        self.destroy()
+
+    def copy(self):
+        cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        cb.set_image(self.pixbuf)
+        cb.store()
+        self.get_titlebar().set_subtitle("클립보드에 복사됨")
+
+    def delete(self):
+        try:
+            Gio.File.new_for_path(self.path).trash(None)
+        except GLib.Error:
+            os.unlink(self.path)
+        notify("스크린샷을 휴지통으로 옮겼습니다", self.path, "user-trash")
+        self.destroy()
+
+
+# ---------------------------------------------------------------------------
 # Capture flows
 # ---------------------------------------------------------------------------
 
 class App:
-    def __init__(self):
+    def __init__(self, report_fd=None):
         self.exit_code = 0
         self.keep_alive = False
+        self.report_fd = report_fd
+
+    def report(self, path):
+        """Print the saved path; when detached, also release the waiting parent."""
+        print(path, flush=True)
+        if self.report_fd is not None:
+            os.write(self.report_fd, path.encode() + b"\n")
+            os.close(self.report_fd)
+            self.report_fd = None
 
     def quit(self, code=None):
         if code is not None:
@@ -401,13 +518,13 @@ class App:
 
     # -- screenshot --------------------------------------------------------
 
-    def screenshot(self, target, pointer=True, delay=0, output=None, clipboard=True):
+    def screenshot(self, target, pointer=True, delay=0, output=None, clipboard=True, preview=True):
         def go():
-            self.choose_target(target, pointer, lambda rect, frozen: self.save_shot(rect, frozen, output, clipboard))
+            self.choose_target(target, pointer, lambda rect, frozen: self.save_shot(rect, frozen, output, clipboard, preview))
             return False
         GLib.timeout_add(max(int(delay * 1000), 1), go)
 
-    def save_shot(self, rect, frozen, output, clipboard):
+    def save_shot(self, rect, frozen, output, clipboard, preview):
         if rect is None:
             self.quit(1)
             return
@@ -415,11 +532,26 @@ class App:
         pixbuf = frozen.new_subpixbuf(x, y, w, h).copy()
         path = output or default_output(video=False)
         pixbuf.savev(path, "png", [], [])
-        print(path)
-        notify("스크린샷을 저장했습니다", f"{path}\n클립보드에도 복사되었습니다.", "camera-photo")
+        self.report(path)
+        if not preview:
+            notify("스크린샷을 저장했습니다",
+                   f"{path}\n클립보드에도 복사되었습니다." if clipboard else path, "camera-photo")
+        if not (clipboard or preview):
+            self.quit(0)
+            return
+
+        # Stay alive while the preview is open and/or we own the clipboard.
+        self.pending = set()
         if clipboard:
+            self.pending.add("clipboard")
             self.hold_clipboard(pixbuf)
-        else:
+        if preview:
+            self.pending.add("preview")
+            PreviewWindow(pixbuf, path, clipboard, lambda: self.release("preview")).show_all()
+
+    def release(self, what):
+        self.pending.discard(what)
+        if not self.pending:
             self.quit(0)
 
     def hold_clipboard(self, pixbuf):
@@ -432,14 +564,11 @@ class App:
         def on_owner_change(_cb, event):
             # First event is our own set_image; a foreign owner arrives as None.
             if event.owner is None and seen["ours"]:
-                self.quit(0)
+                self.release("clipboard")
             seen["ours"] = True
 
         cb.connect("owner-change", on_owner_change)
-        GLib.timeout_add_seconds(3600, lambda: self.quit(0))
-        if os.fork() != 0:
-            # Parent returns to the shell; the child keeps serving the clipboard.
-            os._exit(0)
+        GLib.timeout_add_seconds(3600, lambda: self.release("clipboard"))
 
     # -- screencast --------------------------------------------------------
 
@@ -693,6 +822,7 @@ def parse_args(argv):
     shot.add_argument("-d", "--delay", type=float, default=0)
     shot.add_argument("-o", "--output")
     shot.add_argument("--no-clipboard", action="store_true")
+    shot.add_argument("--no-preview", action="store_true", help="do not show the result window")
 
     rec = sub.add_parser("record", help="start a screencast")
     rec.add_argument("target", choices=TARGETS)
@@ -705,6 +835,21 @@ def parse_args(argv):
     sub.add_parser("stop", help="stop the running screencast")
     sub.add_parser("toggle-record", help="stop if recording, otherwise open the dialog in screencast mode")
     return p.parse_args(argv)
+
+
+def detach():
+    """Fork before GTK/DBus start threads so the shell gets control back once the
+    file is saved, while the child keeps the preview and clipboard alive."""
+    r, w = os.pipe()
+    if os.fork() != 0:
+        os.close(w)
+        data = b""
+        while chunk := os.read(r, 4096):
+            data += chunk
+        os._exit(0 if data else 1)
+    os.close(r)
+    os.setsid()
+    return w
 
 
 def main(argv=None):
@@ -723,14 +868,16 @@ def main(argv=None):
 
     if not check_session():
         return 1
+    report_fd = detach() if cmd == "shot" else None
     Notify.init(APP_NAME)
-    app = App()
+    app = App(report_fd)
 
     if cmd == "ui":
         CaptureDialog(app, video=getattr(args, "video", False)).show_all()
     elif cmd == "shot":
         app.screenshot(args.target, pointer=args.pointer, delay=args.delay,
-                       output=args.output, clipboard=not args.no_clipboard)
+                       output=args.output, clipboard=not args.no_clipboard,
+                       preview=not args.no_preview)
     elif cmd == "record":
         app.record(args.target, pointer=not args.no_pointer, audio=args.audio,
                    delay=args.delay, output=args.output, fps=args.fps)
