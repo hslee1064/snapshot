@@ -466,11 +466,62 @@ class PreviewWindow(Gtk.Window):
         return path
 
 
+class EscapeGrab:
+    """Grab Escape on the X root window so it stops a recording from any app."""
+
+    def __init__(self, callback):
+        self.callback = callback
+        self.display = None
+        self.watch = None
+        try:
+            from Xlib import X, XK, display as xdisplay
+        except ImportError:
+            return
+        self.X = X
+        self.display = xdisplay.Display()
+        self.root = self.display.screen().root
+        self.keycode = self.display.keysym_to_keycode(XK.XK_Escape)
+        # Grab with every combination of CapsLock / NumLock so they don't defeat it.
+        self.mods = (0, X.LockMask, X.Mod2Mask, X.LockMask | X.Mod2Mask)
+        for mod in self.mods:
+            self.root.grab_key(self.keycode, mod, True, X.GrabModeAsync, X.GrabModeAsync,
+                               onerror=lambda *_: None)
+        self.display.flush()
+        self.watch = GLib.io_add_watch(self.display.fileno(), GLib.IO_IN, self.on_event)
+
+    def on_event(self, *_):
+        while self.display.pending_events():
+            event = self.display.next_event()
+            if event.type == self.X.KeyPress and event.detail == self.keycode:
+                self.callback()
+        return True
+
+    def release(self):
+        if self.display is None:
+            return
+        if self.watch is not None:
+            GLib.source_remove(self.watch)
+        for mod in self.mods:
+            self.root.ungrab_key(self.keycode, mod)
+        self.display.close()
+        self.display = None
+
+
 class RecordingFrame(Gtk.Window):
     """Click-through overlay that dims everything outside the area being recorded."""
 
     def __init__(self, rect):
-        super().__init__(type=Gtk.WindowType.POPUP)
+        # A managed window, not override-redirect: mutter drops the shell's input region
+        # (top bar, dock) under override-redirect windows, which made them unclickable.
+        super().__init__(type=Gtk.WindowType.TOPLEVEL)
+        self.set_decorated(False)
+        self.set_type_hint(Gdk.WindowTypeHint.DOCK)
+        self.set_keep_above(True)
+        self.set_accept_focus(False)
+        self.set_focus_on_map(False)
+        self.set_skip_taskbar_hint(True)
+        self.set_skip_pager_hint(True)
+        self.stick()
         self.scale = scale_factor()
         self.rect = rect
         visual = self.get_screen().get_rgba_visual()
@@ -822,7 +873,8 @@ class App:
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGUSR1):
             GLib.unix_signal_add(GLib.PRIORITY_HIGH, sig, self.stop_recording)
         self.setup_indicator()
-        notify("화면 녹화를 시작했습니다", "상단 표시줄의 Snapshot 아이콘이나 'snapshot stop'으로 중지하세요.",
+        self.esc_grab = EscapeGrab(self.stop_recording)
+        notify("화면 녹화를 시작했습니다", "Esc 키나 상단 표시줄의 Snapshot 아이콘으로 중지하세요.",
                "media-record")
 
     def setup_indicator(self):
@@ -863,6 +915,7 @@ class App:
 
     def on_ffmpeg_exit(self, _pid, status):
         clear_pid()
+        self.esc_grab.release()
         if self.indicator is not None:
             self.indicator.set_status(AppIndicator.IndicatorStatus.PASSIVE)
         if self.rec_frame is not None:
