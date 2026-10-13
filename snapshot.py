@@ -119,21 +119,6 @@ def grab_root(path, pointer):
     subprocess.run(cmd, check=True)
 
 
-def frame_extents(xid):
-    """Return _GTK_FRAME_EXTENTS (left, right, top, bottom) for CSD windows."""
-    try:
-        from Xlib import display as xdisplay
-        d = xdisplay.Display()
-        atom = d.intern_atom("_GTK_FRAME_EXTENTS")
-        prop = d.create_resource_object("window", xid).get_full_property(atom, 0)
-        d.close()
-        if prop and len(prop.value) == 4:
-            return tuple(int(v) for v in prop.value)
-    except Exception:
-        pass
-    return 0, 0, 0, 0
-
-
 def visible_windows():
     """Visible top-level windows, topmost first, as (title, (x, y, w, h)) in physical px."""
     screen = Wnck.Screen.get_default()
@@ -147,9 +132,8 @@ def visible_windows():
             continue
         if ws is not None and not win.is_visible_on_workspace(ws):
             continue
-        x, y, w, h = win.get_geometry()
-        left, right, top, bottom = frame_extents(win.get_xid())
-        rect = (x + left, y + top, w - left - right, h - top - bottom)
+        # Mutter already reports the visible frame (CSD shadows excluded), so use it as is.
+        rect = tuple(win.get_geometry())
         if rect[2] > 0 and rect[3] > 0:
             result.append((win.get_name(), rect))
     return result
