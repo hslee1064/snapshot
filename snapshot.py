@@ -545,7 +545,7 @@ class CountdownWindow(Gtk.Window):
 
     SIZE = 160
 
-    def __init__(self, seconds):
+    def __init__(self, seconds, rect=None):
         super().__init__(type=Gtk.WindowType.POPUP)
         self.remaining = int(seconds)
         visual = self.get_screen().get_rgba_visual()
@@ -553,10 +553,16 @@ class CountdownWindow(Gtk.Window):
             self.set_visual(visual)
         self.set_app_paintable(True)
         self.set_default_size(self.SIZE, self.SIZE)
-        display = Gdk.Display.get_default()
-        _, px, py = display.get_default_seat().get_pointer().get_position()[:3]
-        geo = display.get_monitor_at_point(px, py).get_geometry()
-        self.move(geo.x + (geo.width - self.SIZE) // 2, geo.y + (geo.height - self.SIZE) // 2)
+        if rect is not None:
+            # Centre over the chosen area (physical px -> logical).
+            sf = scale_factor()
+            x, y, w, h = (v / sf for v in rect)
+        else:
+            display = Gdk.Display.get_default()
+            _, px, py = display.get_default_seat().get_pointer().get_position()[:3]
+            geo = display.get_monitor_at_point(px, py).get_geometry()
+            x, y, w, h = geo.x, geo.y, geo.width, geo.height
+        self.move(int(x + (w - self.SIZE) / 2), int(y + (h - self.SIZE) / 2))
         self.connect("draw", self.on_draw)
         self.connect("realize", lambda *_: self.get_window().input_shape_combine_region(cairo.Region(), 0, 0))
 
@@ -582,12 +588,12 @@ class CountdownWindow(Gtk.Window):
         return True
 
 
-def countdown(seconds, done):
+def countdown(seconds, done, rect=None):
     """Show a countdown for `seconds`, then call done() once it is off the screen."""
     if seconds <= 0:
         GLib.timeout_add(1, done)
         return
-    win = CountdownWindow(seconds)
+    win = CountdownWindow(seconds, rect)
     win.show_all()
 
     def tick():
@@ -1066,12 +1072,15 @@ class App:
             self.quit(1)
             return
 
-        def go():
-            self.choose_target(target, False,
-                               lambda rect, _frozen: self.start_recording(rect, pointer, audio, output, fps,
-                                                                          preview, target != "all"))
-            return False
-        countdown(delay, go)
+        def chosen(rect, _frozen):
+            start = lambda: (self.start_recording(rect, pointer, audio, output, fps,  # noqa: E731
+                                                  preview, target != "all"), False)[1]
+            # Pick the area first, then count down over it before recording starts.
+            if rect is None or delay <= 0:
+                start()
+            else:
+                countdown(delay, start, rect)
+        GLib.timeout_add(1, lambda: (self.choose_target(target, False, chosen), False)[1])
 
     def start_recording(self, rect, pointer, audio, output, fps, preview, frame):
         if rect is None:
@@ -1138,6 +1147,14 @@ class App:
         return True
 
     def stop_recording(self, *_):
+        if self.ffmpeg.poll() is not None:
+            # Recording is over (only signals get here now): close windows, which also
+            # discards an unsaved recording, and exit.
+            for win in Gtk.Window.list_toplevels():
+                if isinstance(win, (VideoPreviewWindow, CaptureDialog)):
+                    win.destroy()
+            self.quit(0)
+            return True
         if self.ffmpeg.poll() is None:
             try:
                 self.ffmpeg.stdin.write(b"q")
