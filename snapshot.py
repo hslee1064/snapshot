@@ -497,6 +497,9 @@ class App:
         self.exit_code = 0
         self.keep_alive = False
         self.report_fd = report_fd
+        self.pending = set()
+        # Dialog options to reopen with after a screenshot; None outside the dialog flow.
+        self.dialog_settings = None
 
     def report(self, path):
         """Print the saved path; when detached, also release the waiting parent."""
@@ -546,7 +549,10 @@ class App:
 
     def save_shot(self, rect, frozen, output, clipboard, preview):
         if rect is None:
-            self.quit(1)
+            if self.dialog_settings:
+                self.show_dialog()
+            else:
+                self.quit(1)
             return
         x, y, w, h = rect
         pixbuf = frozen.new_subpixbuf(x, y, w, h).copy()
@@ -564,13 +570,27 @@ class App:
             return
 
         # Stay alive while the preview is open and/or we own the clipboard.
-        self.pending = set()
         if clipboard:
             self.pending.add("clipboard")
             self.hold_clipboard(pixbuf)
         if preview:
             self.pending.add("preview")
-            PreviewWindow(pixbuf, path, clipboard, lambda: self.release("preview")).show_all()
+            PreviewWindow(pixbuf, path, clipboard, lambda: self.preview_closed()).show_all()
+
+    def preview_closed(self):
+        if self.dialog_settings:
+            self.show_dialog()
+        else:
+            self.release("preview")
+
+    def show_dialog(self, video=False):
+        self.pending.discard("preview")
+        self.pending.add("dialog")
+        CaptureDialog(self, video=video, **(self.dialog_settings or {})).show_all()
+
+    def dialog_closed(self):
+        self.dialog_settings = None
+        self.release("dialog")
 
     def release(self, what):
         self.pending.discard(what)
@@ -719,7 +739,7 @@ def clear_pid():
 # ---------------------------------------------------------------------------
 
 class CaptureDialog(Gtk.Window):
-    def __init__(self, app, video=False):
+    def __init__(self, app, video=False, target="area", pointer=False, delay=0):
         super().__init__(title=APP_NAME)
         self.app = app
         self.set_resizable(False)
@@ -727,7 +747,7 @@ class CaptureDialog(Gtk.Window):
         self.set_keep_above(True)
         self.set_icon_name(APP_ID)
         self.set_border_width(18)
-        self.connect("delete-event", lambda *_: app.quit(1))
+        self.connect("delete-event", lambda *_: app.dialog_closed())
         self.connect("key-press-event", self.on_key)
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
@@ -768,13 +788,15 @@ class CaptureDialog(Gtk.Window):
         # Options
         grid = Gtk.Grid(column_spacing=12, row_spacing=8)
         self.pointer_chk = Gtk.CheckButton(label="마우스 포인터 표시")
-        self.pointer_chk.set_active(False)
+        self.pointer_chk.set_active(pointer)
         grid.attach(self.pointer_chk, 0, 0, 2, 1)
         self.audio_chk = Gtk.CheckButton(label="시스템 소리 녹음")
         grid.attach(self.audio_chk, 0, 1, 2, 1)
         grid.attach(Gtk.Label(label="지연(초)", xalign=0), 0, 2, 1, 1)
         self.delay_spin = Gtk.SpinButton.new_with_range(0, 60, 1)
         grid.attach(self.delay_spin, 1, 2, 1, 1)
+        self.delay_spin.set_value(delay)
+        self.target_buttons[target].set_active(True)
         box.pack_start(grid, False, False, 0)
 
         self.capture_btn = Gtk.Button()
@@ -795,7 +817,8 @@ class CaptureDialog(Gtk.Window):
     def on_key(self, _w, event):
         key = Gdk.keyval_to_lower(event.keyval)
         if key == Gdk.KEY_Escape:
-            self.app.quit(1)
+            self.destroy()
+            self.app.dialog_closed()
         elif key in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
             self.on_capture()
         elif key == Gdk.KEY_s:
@@ -816,6 +839,8 @@ class CaptureDialog(Gtk.Window):
         delay = self.delay_spin.get_value()
         video = self.video_btn.get_active()
         audio = self.audio_chk.get_active()
+        self.app.pending.discard("dialog")
+        self.app.dialog_settings = None if video else {"target": target, "pointer": pointer, "delay": delay}
         self.destroy()
 
         # Wait for the dialog to disappear from the screen before grabbing.
@@ -896,7 +921,7 @@ def main(argv=None):
     app = App(report_fd)
 
     if cmd == "ui":
-        CaptureDialog(app, video=getattr(args, "video", False)).show_all()
+        app.show_dialog(video=getattr(args, "video", False))
     elif cmd == "shot":
         app.screenshot(args.target, pointer=args.pointer, delay=args.delay,
                        output=args.output, clipboard=not args.no_clipboard,
