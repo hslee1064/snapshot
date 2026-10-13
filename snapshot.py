@@ -752,12 +752,12 @@ DIALOG_CSS = b"""
 .mode button:last-child { border-radius: 0 999px 999px 0; }
 .close { border-radius: 999px; min-width: 28px; min-height: 28px; padding: 0; }
 .snapshot-panel button.shutter {
-    min-width: 58px;
-    min-height: 58px;
+    min-width: 44px;
+    min-height: 44px;
     padding: 0;
     border-radius: 999px;
     background-color: #ffffff;
-    border: 4px solid #242428;
+    border: 3px solid #242428;
     box-shadow: 0 0 0 3px #ffffff;
 }
 .snapshot-panel button.shutter:hover { background-color: #e6e6e6; }
@@ -772,15 +772,17 @@ _css_loaded = False
 class CaptureDialog(Gtk.Window):
     """Floating dark panel modelled on the GNOME Shell screenshot UI."""
 
-    def __init__(self, app, video=False, target="area", pointer=False, delay=0):
+    BOTTOM_MARGIN = 80
+
+    def __init__(self, app, video=False, target="screen", pointer=False, delay=0):
         super().__init__(title=APP_NAME)
         self.app = app
         self.set_resizable(False)
         self.set_decorated(False)
-        self.set_position(Gtk.WindowPosition.CENTER)
         self.set_keep_above(True)
         self.set_icon_name(APP_ID)
         self.connect("delete-event", lambda *_: app.dialog_closed())
+        self.connect("size-allocate", self.place)
         self.connect("key-press-event", self.on_key)
 
         # Transparent window so the panel's rounded corners show.
@@ -895,6 +897,18 @@ class CaptureDialog(Gtk.Window):
         btn.set_valign(Gtk.Align.CENTER)
         btn.get_style_context().add_class(css)
         return btn
+
+    def place(self, *_):
+        """Pin the panel to the bottom centre of the monitor under the pointer (once)."""
+        if getattr(self, "placed", False):
+            return
+        self.placed = True
+        display = Gdk.Display.get_default()
+        _, px, py = display.get_default_seat().get_pointer().get_position()[:3]
+        work = display.get_monitor_at_point(px, py).get_workarea()
+        width, height = self.get_size()
+        self.move(work.x + (work.width - width) // 2,
+                  work.y + work.height - height - self.BOTTOM_MARGIN)
 
     def on_drag(self, _w, event):
         if event.button == 1:
