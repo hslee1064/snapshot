@@ -733,7 +733,7 @@ DIALOG_CSS = b"""
     text-shadow: none;
     -gtk-icon-shadow: none;
     color: #ffffff;
-    outline-color: rgba(255, 255, 255, 0.4);
+    outline-color: transparent;
 }
 .snapshot-panel button:hover { background-color: #44444a; }
 .snapshot-panel button:checked { background-color: #3584e4; }
@@ -888,7 +888,6 @@ class CaptureDialog(Gtk.Window):
 
         self.update_delay_label()
         self.sync()
-        self.capture_btn.grab_focus()
 
     def icon_button(self, icon, tooltip, css, toggle=False):
         btn = Gtk.ToggleButton() if toggle else Gtk.Button()
