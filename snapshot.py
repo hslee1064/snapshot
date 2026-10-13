@@ -405,6 +405,10 @@ class PreviewWindow(Gtk.Window):
         frame.connect("drag-data-get", lambda _w, _c, data, *_: data.set_uris([GLib.filename_to_uri(self.drag_file())]))
         box.pack_start(frame, True, True, 0)
 
+        name = Gtk.Label(label=os.path.basename(path), selectable=True)
+        name.set_ellipsize(2)  # Pango.EllipsizeMode.MIDDLE
+        box.pack_start(name, False, False, 0)
+
         actions = Gtk.Box(spacing=8)
         self.save_btn = Gtk.Button(label="저장")
         self.save_btn.get_style_context().add_class("suggested-action")
