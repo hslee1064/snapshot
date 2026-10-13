@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install BlueSnap for the current user (~/.local).
+# Install Snapshot for the current user (~/.local).
 #   ./install.sh               install app + launcher
 #   ./install.sh --deps        also apt-install dependencies (needs sudo)
 #   ./install.sh --shortcuts   also register GNOME keyboard shortcuts
@@ -16,14 +16,14 @@ for arg in "$@"; do
   esac
 done
 
-install -Dm755 bluesnap.py "$HOME/.local/share/bluesnap/bluesnap.py"
-install -Dm755 /dev/stdin "$HOME/.local/bin/bluesnap" <<'SH'
+install -Dm755 snapshot.py "$HOME/.local/share/snapshot/snapshot.py"
+install -Dm755 /dev/stdin "$HOME/.local/bin/snapshot" <<'SH'
 #!/bin/sh
-exec /usr/bin/python3 "$HOME/.local/share/bluesnap/bluesnap.py" "$@"
+exec /usr/bin/python3 "$HOME/.local/share/snapshot/snapshot.py" "$@"
 SH
-install -Dm644 bluesnap.desktop "$HOME/.local/share/applications/bluesnap.desktop"
+install -Dm644 snapshot.desktop "$HOME/.local/share/applications/snapshot.desktop"
 update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
-echo "Installed: ~/.local/bin/bluesnap"
+echo "Installed: ~/.local/bin/snapshot"
 
 if [[ "${WANT_SHORTCUTS:-}" == 1 ]]; then
   ./shortcuts.sh install

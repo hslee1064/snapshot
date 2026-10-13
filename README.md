@@ -1,4 +1,4 @@
-# BlueSnap
+# Snapshot
 
 Ubuntu 24.04 기본 스크린샷 도구와 같은 기능을 하는 캡처 도구입니다 (X11 세션 전용).
 
@@ -19,11 +19,11 @@ Ubuntu 24.04 기본 스크린샷 도구와 같은 기능을 하는 캡처 도구
 
 | 명령 | 동작 |
 |---|---|
-| `bluesnap` | 캡처 창 열기 (S/C/W 대상, V 모드 전환, Enter 캡처) |
-| `bluesnap shot area\|window\|screen\|all [-p] [-d 초] [-o 파일]` | 스크린샷 |
-| `bluesnap record area\|window\|screen\|all [-a] [--no-pointer] [--fps 30]` | 녹화 시작 |
-| `bluesnap stop` | 녹화 중지 |
-| `bluesnap toggle-record` | 녹화 중이면 중지, 아니면 녹화 모드로 창 열기 |
+| `snapshot` | 캡처 창 열기 (S/C/W 대상, V 모드 전환, Enter 캡처) |
+| `snapshot shot area\|window\|screen\|all [-p] [-d 초] [-o 파일]` | 스크린샷 |
+| `snapshot record area\|window\|screen\|all [-a] [--no-pointer] [--fps 30]` | 녹화 시작 |
+| `snapshot stop` | 녹화 중지 |
+| `snapshot toggle-record` | 녹화 중이면 중지, 아니면 녹화 모드로 창 열기 |
 
 선택 화면에서 Esc나 오른쪽 클릭으로 취소합니다.
 

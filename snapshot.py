@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""BlueSnap - a GNOME-style screenshot / screencast tool for Ubuntu (X11).
+"""Snapshot - a GNOME-style screenshot / screencast tool for Ubuntu (X11).
 
 Targets: selection (area), window, screen (monitor under pointer), all (every monitor).
 Screenshots are grabbed with ffmpeg x11grab (so the pointer can be included),
@@ -35,10 +35,10 @@ except (ValueError, ImportError):
     except (ValueError, ImportError):
         AppIndicator = None
 
-APP_ID = "bluesnap"
-APP_NAME = "BlueSnap"
+APP_ID = "snapshot"
+APP_NAME = "Snapshot"
 RUNTIME_DIR = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
-PID_FILE = os.path.join(RUNTIME_DIR, "bluesnap-record.pid")
+PID_FILE = os.path.join(RUNTIME_DIR, "snapshot-record.pid")
 TARGETS = ("area", "window", "screen", "all")
 
 
@@ -106,7 +106,7 @@ def notify(summary, body="", icon="camera-photo"):
 
 def check_session():
     if os.environ.get("XDG_SESSION_TYPE") == "wayland" or not os.environ.get("DISPLAY"):
-        msg = ("BlueSnap은 X11(Ubuntu on Xorg) 세션에서만 동작합니다.\n"
+        msg = ("Snapshot은 X11(Ubuntu on Xorg) 세션에서만 동작합니다.\n"
                "로그인 화면 우측 하단 톱니바퀴에서 'Ubuntu on Xorg'를 선택하세요.")
         print(msg, file=sys.stderr)
         notify(APP_NAME, msg, "dialog-error")
@@ -484,7 +484,7 @@ class App:
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGUSR1):
             GLib.unix_signal_add(GLib.PRIORITY_HIGH, sig, self.stop_recording)
         self.setup_indicator()
-        notify("화면 녹화를 시작했습니다", "상단 표시줄의 BlueSnap 아이콘이나 'bluesnap stop'으로 중지하세요.",
+        notify("화면 녹화를 시작했습니다", "상단 표시줄의 Snapshot 아이콘이나 'snapshot stop'으로 중지하세요.",
                "media-record")
 
     def setup_indicator(self):
@@ -537,7 +537,7 @@ class App:
 
 
 # ---------------------------------------------------------------------------
-# Recording pid file (used by `bluesnap stop`)
+# Recording pid file (used by `snapshot stop`)
 # ---------------------------------------------------------------------------
 
 def read_pid():
@@ -681,7 +681,7 @@ class CaptureDialog(Gtk.Window):
 # ---------------------------------------------------------------------------
 
 def parse_args(argv):
-    p = argparse.ArgumentParser(prog="bluesnap", description="Screenshot and screencast tool (X11)")
+    p = argparse.ArgumentParser(prog="snapshot", description="Screenshot and screencast tool (X11)")
     sub = p.add_subparsers(dest="cmd")
 
     ui = sub.add_parser("ui", help="open the capture dialog (default)")

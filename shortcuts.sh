@@ -1,29 +1,29 @@
 #!/usr/bin/env bash
-# Register / remove GNOME custom keyboard shortcuts for BlueSnap.
+# Register / remove GNOME custom keyboard shortcuts for Snapshot.
 #   ./shortcuts.sh install | uninstall
 set -euo pipefail
 BASE=/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings
 SCHEMA=org.gnome.settings-daemon.plugins.media-keys
-BIN="$HOME/.local/bin/bluesnap"
+BIN="$HOME/.local/bin/snapshot"
 
 # name | command | binding
 SHORTCUTS=(
-  "BlueSnap|$BIN ui|<Super><Shift>s"
-  "BlueSnap area|$BIN shot area|<Ctrl><Shift>Print"
-  "BlueSnap window|$BIN shot window|<Ctrl><Alt>Print"
-  "BlueSnap record|$BIN toggle-record|<Ctrl><Shift><Alt>r"
+  "Snapshot|$BIN ui|<Super><Shift>s"
+  "Snapshot area|$BIN shot area|<Ctrl><Shift>Print"
+  "Snapshot window|$BIN shot window|<Ctrl><Alt>Print"
+  "Snapshot record|$BIN toggle-record|<Ctrl><Shift><Alt>r"
 )
 
 current=$(gsettings get $SCHEMA custom-keybindings)
-# Drop our previous entries (paths containing /bluesnap).
-paths=$(/usr/bin/python3 -c "import ast,sys; l=ast.literal_eval(sys.argv[1].replace('@as ','')); print(' '.join(p for p in l if '/bluesnap' not in p))" "$current")
+# Drop our previous entries (paths containing /snapshot).
+paths=$(/usr/bin/python3 -c "import ast,sys; l=ast.literal_eval(sys.argv[1].replace('@as ','')); print(' '.join(p for p in l if '/snapshot' not in p))" "$current")
 
 if [[ "${1:-install}" == uninstall ]]; then
-  for i in "${!SHORTCUTS[@]}"; do dconf reset -f "$BASE/bluesnap$i/"; done
+  for i in "${!SHORTCUTS[@]}"; do dconf reset -f "$BASE/snapshot$i/"; done
 else
   for i in "${!SHORTCUTS[@]}"; do
     IFS='|' read -r name cmd key <<<"${SHORTCUTS[$i]}"
-    p="$BASE/bluesnap$i/"
+    p="$BASE/snapshot$i/"
     gsettings set $SCHEMA.custom-keybinding:$p name "$name"
     gsettings set $SCHEMA.custom-keybinding:$p command "$cmd"
     gsettings set $SCHEMA.custom-keybinding:$p binding "$key"
