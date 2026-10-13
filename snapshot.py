@@ -470,6 +470,47 @@ SNI_XML = """
 </node>
 """
 
+DBUSMENU_XML = """
+<node>
+  <interface name="com.canonical.dbusmenu">
+    <property name="Version" type="u" access="read"/>
+    <property name="TextDirection" type="s" access="read"/>
+    <property name="Status" type="s" access="read"/>
+    <property name="IconThemePath" type="as" access="read"/>
+    <method name="GetLayout">
+      <arg type="i" name="parentId" direction="in"/><arg type="i" name="recursionDepth" direction="in"/>
+      <arg type="as" name="propertyNames" direction="in"/>
+      <arg type="u" name="revision" direction="out"/><arg type="(ia{sv}av)" name="layout" direction="out"/>
+    </method>
+    <method name="GetGroupProperties">
+      <arg type="ai" name="ids" direction="in"/><arg type="as" name="propertyNames" direction="in"/>
+      <arg type="a(ia{sv})" name="properties" direction="out"/>
+    </method>
+    <method name="GetProperty">
+      <arg type="i" name="id" direction="in"/><arg type="s" name="name" direction="in"/>
+      <arg type="v" name="value" direction="out"/>
+    </method>
+    <method name="Event">
+      <arg type="i" name="id" direction="in"/><arg type="s" name="eventId" direction="in"/>
+      <arg type="v" name="data" direction="in"/><arg type="u" name="timestamp" direction="in"/>
+    </method>
+    <method name="EventGroup">
+      <arg type="a(isvu)" name="events" direction="in"/><arg type="ai" name="idErrors" direction="out"/>
+    </method>
+    <method name="AboutToShow">
+      <arg type="i" name="id" direction="in"/><arg type="b" name="needUpdate" direction="out"/>
+    </method>
+    <method name="AboutToShowGroup">
+      <arg type="ai" name="ids" direction="in"/>
+      <arg type="ai" name="updatesNeeded" direction="out"/><arg type="ai" name="idErrors" direction="out"/>
+    </method>
+    <signal name="LayoutUpdated"><arg type="u"/><arg type="i"/></signal>
+    <signal name="ItemsPropertiesUpdated"><arg type="a(ia{sv})"/><arg type="a(ias)"/></signal>
+    <signal name="ItemActivationRequested"><arg type="i"/><arg type="u"/></signal>
+  </interface>
+</node>
+"""
+
 
 class RecordingIndicator:
     """Top-bar recording badge (StatusNotifierItem) that stops the recording on click.
@@ -479,6 +520,7 @@ class RecordingIndicator:
     """
 
     PATH = "/StatusNotifierItem"
+    MENU_PATH = "/StatusNotifierItem/Menu"
 
     def __init__(self, on_click):
         self.on_click = on_click
@@ -491,6 +533,10 @@ class RecordingIndicator:
                 | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION, None, None)
             info = Gio.DBusNodeInfo.new_for_xml(SNI_XML).interfaces[0]
             self.conn.register_object(self.PATH, info, self.on_call, self.on_get, None)
+            # The Ubuntu tray only acts on a single left click by opening the menu, so
+            # export a one-item menu and treat "menu opened" as the stop click.
+            menu_info = Gio.DBusNodeInfo.new_for_xml(DBUSMENU_XML).interfaces[0]
+            self.conn.register_object(self.MENU_PATH, menu_info, self.on_menu_call, self.on_menu_get, None)
             self.conn.call_sync("org.kde.StatusNotifierWatcher", "/StatusNotifierWatcher",
                                 "org.kde.StatusNotifierWatcher", "RegisterStatusNotifierItem",
                                 GLib.Variant("(s)", (self.conn.get_unique_name(),)),
@@ -509,7 +555,7 @@ class RecordingIndicator:
             "IconName": GLib.Variant("s", "media-record"),
             "ToolTip": GLib.Variant("(sa(iiay)ss)", tooltip),
             "ItemIsMenu": GLib.Variant("b", False),
-            "Menu": GLib.Variant("o", "/NO_DBUSMENU"),
+            "Menu": GLib.Variant("o", self.MENU_PATH),
             "XAyatanaLabel": GLib.Variant("s", self.label),
         }
         return values.get(prop)
@@ -519,6 +565,46 @@ class RecordingIndicator:
         # Any click on the badge (left, middle or right) stops the recording.
         if method in ("Activate", "SecondaryActivate", "ContextMenu"):
             GLib.idle_add(lambda: (self.on_click(), False)[1])
+
+    def on_menu_get(self, _conn, _sender, _path, _iface, prop):
+        return {
+            "Version": GLib.Variant("u", 3),
+            "TextDirection": GLib.Variant("s", "ltr"),
+            "Status": GLib.Variant("s", "normal"),
+            "IconThemePath": GLib.Variant("as", []),
+        }.get(prop)
+
+    def menu_item(self, item_id):
+        if item_id == 0:
+            return {"children-display": GLib.Variant("s", "submenu")}
+        return {"label": GLib.Variant("s", f"녹화 중지 ({self.label})"),
+                "icon-name": GLib.Variant("s", "media-playback-stop-symbolic")}
+
+    def on_menu_call(self, _conn, _sender, _path, _iface, method, params, invocation):
+        if method == "GetLayout":
+            child = GLib.Variant("(ia{sv}av)", (1, self.menu_item(1), []))
+            layout = (0, self.menu_item(0), [child])
+            invocation.return_value(GLib.Variant("(u(ia{sv}av))", (1, layout)))
+        elif method == "GetGroupProperties":
+            ids = params.unpack()[0] or [0, 1]
+            invocation.return_value(GLib.Variant("(a(ia{sv}))", ([(i, self.menu_item(i)) for i in ids if i in (0, 1)],)))
+        elif method == "GetProperty":
+            item_id, name = params.unpack()
+            invocation.return_value(GLib.Variant("(v)", (self.menu_item(item_id).get(name, GLib.Variant("s", "")),)))
+        elif method == "Event":
+            item_id, event_id = params.unpack()[:2]
+            invocation.return_value(None)
+            if (item_id, event_id) in ((0, "opened"), (1, "clicked")):
+                GLib.idle_add(lambda: (self.on_click(), False)[1])
+        elif method == "EventGroup":
+            events = params.unpack()[0]
+            invocation.return_value(GLib.Variant("(ai)", ([],)))
+            if any((i, e) in ((0, "opened"), (1, "clicked")) for i, e, *_ in events):
+                GLib.idle_add(lambda: (self.on_click(), False)[1])
+        elif method == "AboutToShow":
+            invocation.return_value(GLib.Variant("(b)", (False,)))
+        elif method == "AboutToShowGroup":
+            invocation.return_value(GLib.Variant("(aiai)", ([], [])))
 
     def set_elapsed(self, text):
         self.label = text
