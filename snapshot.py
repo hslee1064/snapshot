@@ -366,7 +366,7 @@ class SelectionOverlay(Gtk.Window):
 # ---------------------------------------------------------------------------
 
 class PreviewWindow(Gtk.Window):
-    """Shows the captured image with quick actions, like GNOME's screenshot result."""
+    """Shows the capture before anything is written; the user decides to save or discard."""
 
     MAX_W, MAX_H = 960, 640
 
@@ -374,6 +374,7 @@ class PreviewWindow(Gtk.Window):
         super().__init__(title="스크린샷")
         self.pixbuf = pixbuf
         self.path = path
+        self.saved = None
         self.on_close = on_close
         self.set_position(Gtk.WindowPosition.CENTER)
         self.set_keep_above(True)
@@ -381,92 +382,110 @@ class PreviewWindow(Gtk.Window):
         self.connect("destroy", lambda *_: self.on_close())
         self.connect("key-press-event", self.on_key)
 
-        header = Gtk.HeaderBar(title="스크린샷을 저장했습니다", show_close_button=True)
-        header.set_subtitle("클립보드에 복사됨" if copied else os.path.basename(path))
-        self.set_titlebar(header)
+        w, h = pixbuf.get_width(), pixbuf.get_height()
+        self.header = Gtk.HeaderBar(title="스크린샷 미리보기", show_close_button=True)
+        self.header.set_subtitle(f"{w} × {h}" + ("  ·  클립보드에 복사됨" if copied else ""))
+        self.set_titlebar(self.header)
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         box.set_border_width(12)
         self.add(box)
 
-        w, h = pixbuf.get_width(), pixbuf.get_height()
         ratio = min(self.MAX_W / w, self.MAX_H / h, 1.0)
         thumb = pixbuf.scale_simple(max(int(w * ratio), 1), max(int(h * ratio), 1),
                                     GdkPixbuf.InterpType.BILINEAR)
-        image = Gtk.Image.new_from_pixbuf(thumb)
         frame = Gtk.EventBox()
-        frame.add(image)
-        frame.set_tooltip_text("더블클릭하면 이미지 뷰어로 엽니다 · 끌어다 놓기 가능")
-        frame.connect("button-press-event", self.on_image_click)
-        # Drag the file out into other apps (chat, browser, file manager).
+        frame.add(Gtk.Image.new_from_pixbuf(thumb))
+        frame.set_tooltip_text("다른 앱으로 끌어다 놓을 수 있습니다")
+        # Drag out into other apps; an unsaved capture is exported to a temp file first.
         frame.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, [], Gdk.DragAction.COPY)
         frame.drag_source_add_uri_targets()
         frame.drag_source_set_icon_pixbuf(thumb.scale_simple(
             max(thumb.get_width() // 4, 1), max(thumb.get_height() // 4, 1), GdkPixbuf.InterpType.BILINEAR))
-        frame.connect("drag-data-get", lambda _w, _c, data, *_: data.set_uris([GLib.filename_to_uri(path)]))
+        frame.connect("drag-data-get", lambda _w, _c, data, *_: data.set_uris([GLib.filename_to_uri(self.drag_file())]))
         box.pack_start(frame, True, True, 0)
 
-        info = Gtk.Label(label=f"{path}  ·  {w} × {h}", xalign=0, selectable=True)
-        info.set_ellipsize(3)  # Pango.EllipsizeMode.END
-        info.get_style_context().add_class("dim-label")
-        box.pack_start(info, False, False, 0)
+        self.info = Gtk.Label(label=f"저장 위치: {path}", xalign=0, selectable=True)
+        self.info.set_ellipsize(3)  # Pango.EllipsizeMode.END
+        self.info.get_style_context().add_class("dim-label")
+        box.pack_start(self.info, False, False, 0)
 
         actions = Gtk.Box(spacing=8)
-        for label, cb in (("열기", self.open_image), ("폴더에서 보기", self.open_folder),
-                          ("복사", self.copy), ("삭제", self.delete)):
+        for label, cb in (("복사", self.copy), ("다른 이름으로 저장…", self.save_as)):
             btn = Gtk.Button(label=label)
             btn.connect("clicked", lambda _b, f=cb: f())
             actions.pack_start(btn, False, False, 0)
-        close = Gtk.Button(label="닫기")
-        close.get_style_context().add_class("suggested-action")
-        close.connect("clicked", lambda *_: self.destroy())
-        actions.pack_end(close, False, False, 0)
+        self.save_btn = Gtk.Button(label="파일로 저장")
+        self.save_btn.get_style_context().add_class("suggested-action")
+        self.save_btn.connect("clicked", lambda *_: self.save(self.path, close=True))
+        discard = Gtk.Button(label="닫기")
+        discard.connect("clicked", lambda *_: self.destroy())
+        actions.pack_end(self.save_btn, False, False, 0)
+        actions.pack_end(discard, False, False, 0)
         box.pack_start(actions, False, False, 0)
-        close.grab_focus()
 
-    def on_image_click(self, _w, event):
-        if event.type == Gdk.EventType.DOUBLE_BUTTON_PRESS:
-            self.open_image()
+        hint = Gtk.Label(label="Enter/Ctrl+S 파일로 저장 · Ctrl+Shift+S 다른 이름으로 · Ctrl+C 복사 · Esc 저장 안 하고 닫기")
+        hint.get_style_context().add_class("dim-label")
+        box.pack_start(hint, False, False, 0)
+        self.save_btn.grab_focus()
 
     def on_key(self, _w, event):
-        if event.keyval == Gdk.KEY_Escape:
+        ctrl = event.state & Gdk.ModifierType.CONTROL_MASK
+        shift = event.state & Gdk.ModifierType.SHIFT_MASK
+        key = Gdk.keyval_to_lower(event.keyval)
+        if key == Gdk.KEY_Escape:
             self.destroy()
-        elif event.keyval == Gdk.KEY_c and event.state & Gdk.ModifierType.CONTROL_MASK:
+        elif key in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) or (ctrl and key == Gdk.KEY_s and not shift):
+            self.save(self.path, close=True)
+        elif ctrl and key == Gdk.KEY_s:
+            self.save_as()
+        elif ctrl and key == Gdk.KEY_c:
             self.copy()
-        elif event.keyval == Gdk.KEY_Delete:
-            self.delete()
         else:
             return False
         return True
 
-    def open_image(self):
-        subprocess.Popen(["xdg-open", self.path])
-        self.destroy()
-
-    def open_folder(self):
-        # Ask the file manager to select the file; fall back to opening the folder.
+    def save(self, path, close):
         try:
-            subprocess.run(["dbus-send", "--session", "--print-reply", "--dest=org.freedesktop.FileManager1",
-                            "/org/freedesktop/FileManager1", "org.freedesktop.FileManager1.ShowItems",
-                            f"array:string:{GLib.filename_to_uri(self.path)}", "string:"],
-                           check=True, capture_output=True, timeout=5)
-        except (subprocess.SubprocessError, FileNotFoundError):
-            subprocess.Popen(["xdg-open", os.path.dirname(self.path)])
-        self.destroy()
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            self.pixbuf.savev(path, "png", [], [])
+        except (GLib.Error, OSError) as exc:
+            self.info.set_text(f"저장 실패: {exc}")
+            return
+        self.saved = path
+        print(path, flush=True)
+        notify("스크린샷을 저장했습니다", path, "camera-photo")
+        if close:
+            self.destroy()
+
+    def save_as(self):
+        dialog = Gtk.FileChooserDialog(title="스크린샷 저장", parent=self, action=Gtk.FileChooserAction.SAVE)
+        dialog.add_buttons("취소", Gtk.ResponseType.CANCEL, "저장", Gtk.ResponseType.ACCEPT)
+        dialog.set_do_overwrite_confirmation(True)
+        dialog.set_current_folder(os.path.dirname(self.path))
+        dialog.set_current_name(os.path.basename(self.path))
+        if dialog.run() == Gtk.ResponseType.ACCEPT:
+            path = dialog.get_filename()
+            dialog.destroy()
+            if not path.lower().endswith(".png"):
+                path += ".png"
+            self.save(path, close=True)
+        else:
+            dialog.destroy()
+
+    def drag_file(self):
+        if self.saved:
+            return self.saved
+        folder = tempfile.mkdtemp(prefix="snapshot-")
+        path = os.path.join(folder, os.path.basename(self.path))
+        self.pixbuf.savev(path, "png", [], [])
+        return path
 
     def copy(self):
         cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
         cb.set_image(self.pixbuf)
         cb.store()
-        self.get_titlebar().set_subtitle("클립보드에 복사됨")
-
-    def delete(self):
-        try:
-            Gio.File.new_for_path(self.path).trash(None)
-        except GLib.Error:
-            os.unlink(self.path)
-        notify("스크린샷을 휴지통으로 옮겼습니다", self.path, "user-trash")
-        self.destroy()
+        self.header.set_subtitle(f"{self.pixbuf.get_width()} × {self.pixbuf.get_height()}  ·  클립보드에 복사됨")
 
 
 # ---------------------------------------------------------------------------
@@ -481,9 +500,10 @@ class App:
 
     def report(self, path):
         """Print the saved path; when detached, also release the waiting parent."""
-        print(path, flush=True)
+        if path:
+            print(path, flush=True)
         if self.report_fd is not None:
-            os.write(self.report_fd, path.encode() + b"\n")
+            os.write(self.report_fd, (path or "").encode() + b"\n")
             os.close(self.report_fd)
             self.report_fd = None
 
@@ -531,9 +551,12 @@ class App:
         x, y, w, h = rect
         pixbuf = frozen.new_subpixbuf(x, y, w, h).copy()
         path = output or default_output(video=False)
-        pixbuf.savev(path, "png", [], [])
-        self.report(path)
-        if not preview:
+        if preview:
+            # Nothing is written yet; the preview window saves on request.
+            self.report(None)
+        else:
+            pixbuf.savev(path, "png", [], [])
+            self.report(path)
             notify("스크린샷을 저장했습니다",
                    f"{path}\n클립보드에도 복사되었습니다." if clipboard else path, "camera-photo")
         if not (clipboard or preview):
