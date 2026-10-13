@@ -540,6 +540,68 @@ class RecordingIndicator:
             self.conn = None
 
 
+class CountdownWindow(Gtk.Window):
+    """Big round countdown shown in the middle of the monitor under the pointer."""
+
+    SIZE = 160
+
+    def __init__(self, seconds):
+        super().__init__(type=Gtk.WindowType.POPUP)
+        self.remaining = int(seconds)
+        visual = self.get_screen().get_rgba_visual()
+        if visual is not None:
+            self.set_visual(visual)
+        self.set_app_paintable(True)
+        self.set_default_size(self.SIZE, self.SIZE)
+        display = Gdk.Display.get_default()
+        _, px, py = display.get_default_seat().get_pointer().get_position()[:3]
+        geo = display.get_monitor_at_point(px, py).get_geometry()
+        self.move(geo.x + (geo.width - self.SIZE) // 2, geo.y + (geo.height - self.SIZE) // 2)
+        self.connect("draw", self.on_draw)
+        self.connect("realize", lambda *_: self.get_window().input_shape_combine_region(cairo.Region(), 0, 0))
+
+    def on_draw(self, _w, cr):
+        r = self.SIZE / 2
+        cr.set_operator(cairo.OPERATOR_SOURCE)
+        cr.set_source_rgba(0, 0, 0, 0)
+        cr.paint()
+        cr.set_operator(cairo.OPERATOR_OVER)
+        cr.arc(r, r, r - 4, 0, 6.2832)
+        cr.set_source_rgba(0.14, 0.14, 0.16, 0.85)
+        cr.fill_preserve()
+        cr.set_source_rgba(1, 1, 1, 0.9)
+        cr.set_line_width(4)
+        cr.stroke()
+        cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        cr.set_font_size(84)
+        text = str(self.remaining)
+        ext = cr.text_extents(text)
+        cr.move_to(r - ext.width / 2 - ext.x_bearing, r - ext.height / 2 - ext.y_bearing)
+        cr.set_source_rgb(1, 1, 1)
+        cr.show_text(text)
+        return True
+
+
+def countdown(seconds, done):
+    """Show a countdown for `seconds`, then call done() once it is off the screen."""
+    if seconds <= 0:
+        GLib.timeout_add(1, done)
+        return
+    win = CountdownWindow(seconds)
+    win.show_all()
+
+    def tick():
+        win.remaining -= 1
+        if win.remaining > 0:
+            win.queue_draw()
+            return True
+        win.destroy()
+        # Give the compositor a moment to drop the countdown before grabbing.
+        GLib.timeout_add(150, done)
+        return False
+    GLib.timeout_add(1000, tick)
+
+
 class EscapeGrab:
     """Grab Escape on the X root window so it stops a recording from any app."""
 
@@ -928,7 +990,7 @@ class App:
         def go():
             self.choose_target(target, pointer, lambda rect, frozen: self.save_shot(rect, frozen, output, clipboard, preview))
             return False
-        GLib.timeout_add(max(int(delay * 1000), 1), go)
+        countdown(delay, go)
 
     def save_shot(self, rect, frozen, output, clipboard, preview):
         if rect is None:
@@ -1009,7 +1071,7 @@ class App:
                                lambda rect, _frozen: self.start_recording(rect, pointer, audio, output, fps,
                                                                           preview, target != "all"))
             return False
-        GLib.timeout_add(max(int(delay * 1000), 1), go)
+        countdown(delay, go)
 
     def start_recording(self, rect, pointer, audio, output, fps, preview, frame):
         if rect is None:
