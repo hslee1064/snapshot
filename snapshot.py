@@ -378,7 +378,7 @@ class PreviewWindow(Gtk.Window):
         self.on_close = on_close
         self.set_position(Gtk.WindowPosition.CENTER)
         self.set_keep_above(True)
-        self.set_icon_name("applets-screenshooter")
+        self.set_icon_name(APP_ID)
         self.connect("destroy", lambda *_: self.on_close())
         self.connect("key-press-event", self.on_key)
 
@@ -725,7 +725,7 @@ class CaptureDialog(Gtk.Window):
         self.set_resizable(False)
         self.set_position(Gtk.WindowPosition.CENTER)
         self.set_keep_above(True)
-        self.set_icon_name("applets-screenshooter")
+        self.set_icon_name(APP_ID)
         self.set_border_width(18)
         self.connect("delete-event", lambda *_: app.quit(1))
         self.connect("key-press-event", self.on_key)

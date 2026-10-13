@@ -21,6 +21,8 @@ install -Dm755 /dev/stdin "$HOME/.local/bin/snapshot" <<'SH'
 #!/bin/sh
 exec /usr/bin/python3 "$HOME/.local/share/snapshot/snapshot.py" "$@"
 SH
+install -Dm644 snapshot.svg "$HOME/.local/share/icons/hicolor/scalable/apps/snapshot.svg"
+gtk-update-icon-cache -q -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
 install -Dm644 snapshot.desktop "$HOME/.local/share/applications/snapshot.desktop"
 update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 echo "Installed: ~/.local/bin/snapshot"
