@@ -715,23 +715,108 @@ def clear_pid():
 # Main dialog (GNOME screenshot UI look-alike)
 # ---------------------------------------------------------------------------
 
+DIALOG_CSS = b"""
+.snapshot-window { background-color: transparent; }
+.snapshot-panel {
+    background-color: #242428;
+    border-radius: 22px;
+    padding: 16px 18px 18px 18px;
+    color: #ffffff;
+}
+.snapshot-panel label { color: #ffffff; }
+.snapshot-title { font-weight: bold; font-size: 15px; }
+.snapshot-panel button {
+    background-image: none;
+    background-color: #36363b;
+    border: none;
+    box-shadow: none;
+    text-shadow: none;
+    -gtk-icon-shadow: none;
+    color: #ffffff;
+    outline-color: rgba(255, 255, 255, 0.4);
+}
+.snapshot-panel button:hover { background-color: #44444a; }
+.snapshot-panel button:checked { background-color: #3584e4; }
+.snapshot-panel button:checked:hover { background-color: #4a92ea; }
+.snapshot-panel button image { color: #ffffff; }
+.target {
+    border-radius: 14px;
+    padding: 14px 0 10px 0;
+    min-width: 124px;
+}
+.target label { font-size: 13px; }
+.chip { border-radius: 999px; min-width: 36px; min-height: 36px; padding: 0; }
+.chip.delay { padding: 0 12px; }
+.mode button { min-width: 44px; min-height: 36px; padding: 0; }
+.mode button:first-child { border-radius: 999px 0 0 999px; }
+.mode button:last-child { border-radius: 0 999px 999px 0; }
+.close { border-radius: 999px; min-width: 28px; min-height: 28px; padding: 0; }
+.snapshot-panel button.shutter {
+    min-width: 58px;
+    min-height: 58px;
+    padding: 0;
+    border-radius: 999px;
+    background-color: #ffffff;
+    border: 4px solid #242428;
+    box-shadow: 0 0 0 3px #ffffff;
+}
+.snapshot-panel button.shutter:hover { background-color: #e6e6e6; }
+.snapshot-panel button.shutter.recording { background-color: #e01b24; }
+.snapshot-panel button.shutter.recording:hover { background-color: #c01c28; }
+"""
+
+DELAYS = (0, 3, 5, 10)
+_css_loaded = False
+
+
 class CaptureDialog(Gtk.Window):
+    """Floating dark panel modelled on the GNOME Shell screenshot UI."""
+
     def __init__(self, app, video=False, target="area", pointer=False, delay=0):
         super().__init__(title=APP_NAME)
         self.app = app
         self.set_resizable(False)
+        self.set_decorated(False)
         self.set_position(Gtk.WindowPosition.CENTER)
         self.set_keep_above(True)
         self.set_icon_name(APP_ID)
-        self.set_border_width(18)
         self.connect("delete-event", lambda *_: app.dialog_closed())
         self.connect("key-press-event", self.on_key)
 
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
-        self.add(box)
+        # Transparent window so the panel's rounded corners show.
+        visual = self.get_screen().get_rgba_visual()
+        if visual is not None:
+            self.set_visual(visual)
+        self.set_app_paintable(True)
+        global _css_loaded
+        if not _css_loaded:
+            provider = Gtk.CssProvider()
+            provider.load_from_data(DIALOG_CSS)
+            Gtk.StyleContext.add_provider_for_screen(self.get_screen(), provider,
+                                                     Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            _css_loaded = True
+        self.get_style_context().add_class("snapshot-window")
 
-        # Target buttons
-        target_box = Gtk.Box(spacing=8, homogeneous=True)
+        # The whole panel is a drag handle since there is no title bar.
+        handle = Gtk.EventBox()
+        handle.connect("button-press-event", self.on_drag)
+        self.add(handle)
+        panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        panel.get_style_context().add_class("snapshot-panel")
+        handle.add(panel)
+
+        # Header: title + close
+        header = Gtk.Box(spacing=8)
+        self.title_label = Gtk.Label(xalign=0)
+        self.title_label.get_style_context().add_class("snapshot-title")
+        header.pack_start(self.title_label, True, True, 0)
+        close = self.icon_button("window-close-symbolic", "닫기", "close")
+        close.connect("clicked", lambda *_: self.close_dialog())
+        header.pack_end(close, False, False, 0)
+        panel.pack_start(header, False, False, 0)
+
+        # Targets
+        target_box = Gtk.Box(spacing=10, homogeneous=True)
         self.target_buttons = {}
         group = None
         for key, label, icon in (("area", "선택 영역", "edit-select-all-symbolic"),
@@ -739,60 +824,106 @@ class CaptureDialog(Gtk.Window):
                                  ("window", "창", "focus-windows-symbolic")):
             btn = Gtk.RadioButton.new_from_widget(group)
             btn.set_mode(False)
+            btn.get_style_context().add_class("target")
             group = group or btn
-            inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-            inner.set_border_width(10)
-            inner.pack_start(Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.DND), False, False, 0)
+            inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            image = Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.DND)
+            image.set_pixel_size(32)
+            inner.pack_start(image, False, False, 0)
             inner.pack_start(Gtk.Label(label=label), False, False, 0)
             btn.add(inner)
             target_box.pack_start(btn, True, True, 0)
             self.target_buttons[key] = btn
-        box.pack_start(target_box, False, False, 0)
-
-        # Screenshot / screencast switch
-        mode_box = Gtk.Box(spacing=0)
-        mode_box.get_style_context().add_class("linked")
-        mode_box.set_halign(Gtk.Align.CENTER)
-        self.shot_btn = Gtk.RadioButton.new_with_label_from_widget(None, "📷  스크린샷")
-        self.video_btn = Gtk.RadioButton.new_with_label_from_widget(self.shot_btn, "🎥  화면 녹화")
-        for b in (self.shot_btn, self.video_btn):
-            b.set_mode(False)
-            mode_box.pack_start(b, False, False, 0)
-        self.video_btn.set_active(video)
-        self.video_btn.connect("toggled", lambda *_: self.sync())
-        box.pack_start(mode_box, False, False, 0)
-
-        # Options
-        grid = Gtk.Grid(column_spacing=12, row_spacing=8)
-        self.pointer_chk = Gtk.CheckButton(label="마우스 포인터 표시")
-        self.pointer_chk.set_active(pointer)
-        grid.attach(self.pointer_chk, 0, 0, 2, 1)
-        self.audio_chk = Gtk.CheckButton(label="시스템 소리 녹음")
-        grid.attach(self.audio_chk, 0, 1, 2, 1)
-        grid.attach(Gtk.Label(label="지연(초)", xalign=0), 0, 2, 1, 1)
-        self.delay_spin = Gtk.SpinButton.new_with_range(0, 60, 1)
-        grid.attach(self.delay_spin, 1, 2, 1, 1)
-        self.delay_spin.set_value(delay)
         self.target_buttons[target].set_active(True)
-        box.pack_start(grid, False, False, 0)
+        panel.pack_start(target_box, False, False, 0)
+
+        # Bottom bar: options | shutter | mode
+        bar = Gtk.Box(spacing=8)
+        options = Gtk.Box(spacing=8)
+        self.pointer_chk = self.icon_button("input-mouse-symbolic", "마우스 포인터 표시", "chip", toggle=True)
+        self.pointer_chk.set_active(pointer)
+        options.pack_start(self.pointer_chk, False, False, 0)
+        self.audio_chk = self.icon_button("audio-volume-high-symbolic", "시스템 소리 녹음", "chip", toggle=True)
+        self.audio_chk.get_child().show()
+        self.audio_chk.set_no_show_all(True)
+        options.pack_start(self.audio_chk, False, False, 0)
+        self.delay = delay if delay in DELAYS else DELAYS[0]
+        self.delay_btn = Gtk.Button()
+        self.delay_btn.get_style_context().add_class("chip")
+        self.delay_btn.get_style_context().add_class("delay")
+        self.delay_btn.set_tooltip_text("지연 시간")
+        self.delay_btn.set_valign(Gtk.Align.CENTER)
+        delay_inner = Gtk.Box(spacing=6)
+        delay_inner.pack_start(Gtk.Image.new_from_icon_name("alarm-symbolic", Gtk.IconSize.BUTTON), False, False, 0)
+        self.delay_label = Gtk.Label()
+        delay_inner.pack_start(self.delay_label, False, False, 0)
+        self.delay_btn.add(delay_inner)
+        self.delay_btn.connect("clicked", self.cycle_delay)
+        options.pack_start(self.delay_btn, False, False, 0)
+        bar.pack_start(options, False, False, 0)
 
         self.capture_btn = Gtk.Button()
-        self.capture_btn.get_style_context().add_class("suggested-action")
+        self.capture_btn.get_style_context().add_class("shutter")
+        self.capture_btn.set_valign(Gtk.Align.CENTER)
         self.capture_btn.connect("clicked", self.on_capture)
-        box.pack_start(self.capture_btn, False, False, 0)
+        bar.set_center_widget(self.capture_btn)
 
+        mode_box = Gtk.Box()
+        mode_box.get_style_context().add_class("mode")
+        self.shot_btn = Gtk.RadioButton.new_from_widget(None)
+        self.video_btn = Gtk.RadioButton.new_from_widget(self.shot_btn)
+        for btn, icon, tip in ((self.shot_btn, "camera-photo-symbolic", "스크린샷"),
+                               (self.video_btn, "camera-video-symbolic", "화면 녹화")):
+            btn.set_mode(False)
+            btn.set_tooltip_text(tip)
+            btn.add(Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.BUTTON))
+            mode_box.pack_start(btn, False, False, 0)
+        self.video_btn.set_active(video)
+        self.video_btn.connect("toggled", lambda *_: self.sync())
+        mode_box.set_valign(Gtk.Align.CENTER)
+        bar.pack_end(mode_box, False, False, 0)
+        panel.pack_start(bar, False, False, 0)
+
+        self.update_delay_label()
         self.sync()
+        self.capture_btn.grab_focus()
+
+    def icon_button(self, icon, tooltip, css, toggle=False):
+        btn = Gtk.ToggleButton() if toggle else Gtk.Button()
+        btn.add(Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.BUTTON))
+        btn.set_tooltip_text(tooltip)
+        btn.set_valign(Gtk.Align.CENTER)
+        btn.get_style_context().add_class(css)
+        return btn
+
+    def on_drag(self, _w, event):
+        if event.button == 1:
+            self.begin_move_drag(event.button, int(event.x_root), int(event.y_root), event.time)
+        return False
+
+    def cycle_delay(self, *_):
+        self.delay = DELAYS[(DELAYS.index(self.delay) + 1) % len(DELAYS)]
+        self.update_delay_label()
+
+    def update_delay_label(self):
+        self.delay_label.set_text(f"{self.delay}초" if self.delay else "바로")
+
+    def close_dialog(self):
+        self.destroy()
+        self.app.dialog_closed()
 
     def sync(self):
         video = self.video_btn.get_active()
-        self.audio_chk.set_sensitive(video)
-        self.capture_btn.set_label("녹화 시작" if video else "캡처")
+        self.audio_chk.set_visible(video)
+        self.title_label.set_text("화면 녹화" if video else "스크린샷")
+        self.capture_btn.set_tooltip_text("녹화 시작" if video else "캡처")
+        ctx = self.capture_btn.get_style_context()
+        (ctx.add_class if video else ctx.remove_class)("recording")
 
     def on_key(self, _w, event):
         key = Gdk.keyval_to_lower(event.keyval)
         if key == Gdk.KEY_Escape:
-            self.destroy()
-            self.app.dialog_closed()
+            self.close_dialog()
         elif key in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
             self.on_capture()
         elif key == Gdk.KEY_s:
@@ -810,7 +941,7 @@ class CaptureDialog(Gtk.Window):
     def on_capture(self, *_):
         target = next(k for k, b in self.target_buttons.items() if b.get_active())
         pointer = self.pointer_chk.get_active()
-        delay = self.delay_spin.get_value()
+        delay = self.delay
         video = self.video_btn.get_active()
         audio = self.audio_chk.get_active()
         self.app.pending.discard("dialog")
