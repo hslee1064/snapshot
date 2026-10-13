@@ -1329,8 +1329,8 @@ class CaptureDialog(Gtk.Window):
         self.target_buttons = {}
         group = None
         for key, label, icon in (("area", "선택 영역", "edit-select-all-symbolic"),
-                                 ("screen", "화면", "video-display-symbolic"),
-                                 ("window", "창", "focus-windows-symbolic")):
+                                 ("window", "창", "focus-windows-symbolic"),
+                                 ("screen", "화면", "video-display-symbolic")):
             btn = Gtk.RadioButton.new_from_widget(group)
             btn.set_mode(False)
             btn.get_style_context().add_class("target")
