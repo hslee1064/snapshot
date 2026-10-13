@@ -968,19 +968,25 @@ class App:
 
     # -- target selection --------------------------------------------------
 
-    def choose_target(self, target, pointer, callback):
-        """Freeze the screen, let the user choose, then callback(rect, frozen_pixbuf)."""
+    def grab_screen(self, pointer):
+        """Whole-screen pixbuf, or None (after notifying and quitting) on failure."""
         tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
         tmp.close()
         try:
             grab_root(tmp.name, pointer)
-            frozen = GdkPixbuf.Pixbuf.new_from_file(tmp.name)
+            return GdkPixbuf.Pixbuf.new_from_file(tmp.name)
         except (subprocess.CalledProcessError, GLib.Error) as exc:
             notify(APP_NAME, f"화면을 캡처하지 못했습니다: {exc}", "dialog-error")
             self.quit(1)
-            return
+            return None
         finally:
             os.unlink(tmp.name)
+
+    def choose_target(self, target, pointer, callback):
+        """Freeze the screen, let the user choose, then callback(rect, frozen_pixbuf)."""
+        frozen = self.grab_screen(pointer)
+        if frozen is None:
+            return
 
         if target == "all":
             callback((0, 0, frozen.get_width(), frozen.get_height()), frozen)
@@ -993,10 +999,19 @@ class App:
     # -- screenshot --------------------------------------------------------
 
     def screenshot(self, target, pointer=True, delay=0, output=None, clipboard=True, preview=True):
-        def go():
-            self.choose_target(target, pointer, lambda rect, frozen: self.save_shot(rect, frozen, output, clipboard, preview))
-            return False
-        countdown(delay, go)
+        def chosen(rect, frozen):
+            if rect is None or delay <= 0:
+                self.save_shot(rect, frozen, output, clipboard, preview)
+                return
+
+            # Area picked on the frozen frame; count down over it, then grab it fresh.
+            def shoot():
+                fresh = self.grab_screen(pointer)
+                if fresh is not None:
+                    self.save_shot(rect, fresh, output, clipboard, preview)
+                return False
+            countdown(delay, shoot, rect)
+        GLib.timeout_add(1, lambda: (self.choose_target(target, pointer, chosen), False)[1])
 
     def save_shot(self, rect, frozen, output, clipboard, preview):
         if rect is None:
