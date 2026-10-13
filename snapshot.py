@@ -406,9 +406,9 @@ class PreviewWindow(Gtk.Window):
         box.pack_start(frame, True, True, 0)
 
         actions = Gtk.Box(spacing=8)
-        name = Gtk.Label(label=os.path.basename(path), selectable=True, xalign=0)
+        name = Gtk.Label(label=os.path.basename(path), selectable=True)
         name.set_ellipsize(2)  # Pango.EllipsizeMode.MIDDLE
-        actions.pack_start(name, True, True, 0)
+        actions.set_center_widget(name)
         self.save_btn = Gtk.Button(label="저장")
         self.save_btn.get_style_context().add_class("suggested-action")
         self.save_btn.connect("clicked", lambda *_: self.save_as())
