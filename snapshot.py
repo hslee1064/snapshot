@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 
+import cairo
 import gi
 
 gi.require_version("Gtk", "3.0")
@@ -465,6 +466,177 @@ class PreviewWindow(Gtk.Window):
         return path
 
 
+class RecordingFrame(Gtk.Window):
+    """Click-through overlay that dims everything outside the area being recorded."""
+
+    def __init__(self, rect):
+        super().__init__(type=Gtk.WindowType.POPUP)
+        self.scale = scale_factor()
+        self.rect = rect
+        visual = self.get_screen().get_rgba_visual()
+        if visual is not None:
+            self.set_visual(visual)
+        self.set_app_paintable(True)
+        w, h = root_size()
+        self.move(0, 0)
+        self.set_default_size(w // self.scale, h // self.scale)
+        self.connect("draw", self.on_draw)
+        self.connect("realize", self.on_realize)
+
+    def on_realize(self, *_):
+        # An empty input shape lets every click fall through to the windows below.
+        self.get_window().input_shape_combine_region(cairo.Region(), 0, 0)
+
+    def on_draw(self, _w, cr):
+        s = self.scale
+        x, y, w, h = (v / s for v in self.rect)
+        cr.set_operator(cairo.OPERATOR_SOURCE)
+        cr.set_source_rgba(0, 0, 0, 0.45)
+        cr.paint()
+        # Keep the recorded area fully clear; the border sits just outside it.
+        cr.set_operator(cairo.OPERATOR_CLEAR)
+        cr.rectangle(x, y, w, h)
+        cr.fill()
+        cr.set_operator(cairo.OPERATOR_OVER)
+        cr.set_source_rgba(0.88, 0.11, 0.14, 0.9)
+        cr.set_line_width(2)
+        cr.rectangle(x - 1.5, y - 1.5, w + 3, h + 3)
+        cr.stroke()
+        return True
+
+
+class VideoPreviewWindow(Gtk.Window):
+    """Plays back a finished recording; the file is kept only if the user saves it."""
+
+    MAX_W, MAX_H = 960, 640
+
+    @staticmethod
+    def available():
+        try:
+            gi.require_version("Gst", "1.0")
+            from gi.repository import Gst
+            Gst.init(None)
+            return Gst.ElementFactory.find("gtksink") is not None
+        except (ValueError, ImportError):
+            return False
+
+    def __init__(self, temp_path, target_path, size, on_close):
+        super().__init__(title="화면 녹화")
+        from gi.repository import Gst
+        self.Gst = Gst
+        self.temp_path = temp_path
+        self.target_path = target_path
+        self.saved = False
+        self.on_close = on_close
+        self.set_position(Gtk.WindowPosition.CENTER)
+        self.set_keep_above(True)
+        self.set_icon_name(APP_ID)
+        self.connect("destroy", self.on_destroy)
+        self.connect("key-press-event", self.on_key)
+
+        w, h = size
+        self.header = Gtk.HeaderBar(title="화면 녹화 미리보기", show_close_button=True)
+        self.header.set_subtitle(f"{w} × {h}")
+        self.set_titlebar(self.header)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.set_border_width(12)
+        self.add(box)
+
+        self.player = Gst.ElementFactory.make("playbin", None)
+        sink = Gst.ElementFactory.make("gtksink", None)
+        self.player.set_property("video-sink", sink)
+        self.player.set_property("uri", GLib.filename_to_uri(temp_path))
+        video = sink.get_property("widget")
+        ratio = min(self.MAX_W / w, self.MAX_H / h, 1.0)
+        video.set_size_request(max(int(w * ratio), 1), max(int(h * ratio), 1))
+        box.pack_start(video, True, True, 0)
+
+        bus = self.player.get_bus()
+        bus.add_signal_watch()
+        bus.connect("message::eos", self.on_eos)
+
+        actions = Gtk.Box(spacing=8)
+        self.play_btn = Gtk.Button()
+        self.play_img = Gtk.Image.new_from_icon_name("media-playback-pause-symbolic", Gtk.IconSize.BUTTON)
+        self.play_btn.add(self.play_img)
+        self.play_btn.connect("clicked", lambda *_: self.toggle_play())
+        actions.pack_start(self.play_btn, False, False, 0)
+        name = Gtk.Label(label=os.path.basename(target_path), selectable=True)
+        name.set_ellipsize(2)  # Pango.EllipsizeMode.MIDDLE
+        actions.set_center_widget(name)
+        save = Gtk.Button(label="저장")
+        save.get_style_context().add_class("suggested-action")
+        save.connect("clicked", lambda *_: self.save_as())
+        actions.pack_end(save, False, False, 0)
+        box.pack_start(actions, False, False, 0)
+
+        self.playing = True
+        self.player.set_state(Gst.State.PLAYING)
+
+    def toggle_play(self):
+        self.playing = not self.playing
+        self.player.set_state(self.Gst.State.PLAYING if self.playing else self.Gst.State.PAUSED)
+        self.play_img.set_from_icon_name(
+            "media-playback-pause-symbolic" if self.playing else "media-playback-start-symbolic",
+            Gtk.IconSize.BUTTON)
+
+    def on_eos(self, *_):
+        # Rewind and pause on the first frame so it can be replayed.
+        self.player.seek_simple(self.Gst.Format.TIME, self.Gst.SeekFlags.FLUSH, 0)
+        if self.playing:
+            self.toggle_play()
+
+    def on_key(self, _w, event):
+        ctrl = event.state & Gdk.ModifierType.CONTROL_MASK
+        key = Gdk.keyval_to_lower(event.keyval)
+        if key == Gdk.KEY_Escape:
+            self.destroy()
+        elif key == Gdk.KEY_space:
+            self.toggle_play()
+        elif key in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) or (ctrl and key == Gdk.KEY_s):
+            self.save_as()
+        else:
+            return False
+        return True
+
+    def save_as(self):
+        if self.playing:
+            self.toggle_play()
+        dialog = Gtk.FileChooserDialog(title="화면 녹화 저장", parent=self, action=Gtk.FileChooserAction.SAVE)
+        dialog.add_buttons("취소", Gtk.ResponseType.CANCEL, "저장", Gtk.ResponseType.ACCEPT)
+        dialog.set_do_overwrite_confirmation(True)
+        os.makedirs(os.path.dirname(self.target_path), exist_ok=True)
+        dialog.set_current_folder(os.path.dirname(self.target_path))
+        dialog.set_current_name(os.path.basename(self.target_path))
+        response = dialog.run()
+        path = dialog.get_filename()
+        dialog.destroy()
+        if response != Gtk.ResponseType.ACCEPT or not path:
+            return
+        if not path.lower().endswith(".mp4"):
+            path += ".mp4"
+        self.player.set_state(self.Gst.State.NULL)
+        try:
+            shutil.move(self.temp_path, path)
+        except OSError as exc:
+            self.header.set_subtitle(f"저장 실패: {exc}")
+            return
+        self.saved = True
+        print(path, flush=True)
+        notify("화면 녹화를 저장했습니다", path, "video-x-generic")
+        self.destroy()
+
+    def on_destroy(self, *_):
+        self.player.set_state(self.Gst.State.NULL)
+        if not self.saved:
+            try:
+                os.unlink(self.temp_path)
+            except OSError:
+                pass
+        self.on_close()
+
+
 # ---------------------------------------------------------------------------
 # Capture flows
 # ---------------------------------------------------------------------------
@@ -563,7 +735,9 @@ class App:
     def show_dialog(self, video=False):
         self.pending.discard("preview")
         self.pending.add("dialog")
-        CaptureDialog(self, video=video, **(self.dialog_settings or {})).show_all()
+        kwargs = dict(self.dialog_settings or {})
+        kwargs.setdefault("video", video)
+        CaptureDialog(self, **kwargs).show_all()
 
     def dialog_closed(self):
         self.dialog_settings = None
@@ -579,20 +753,18 @@ class App:
         cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
         cb.set_image(pixbuf)
         cb.store()
-        seen = {"ours": False}
-
         def on_owner_change(_cb, event):
-            # First event is our own set_image; a foreign owner arrives as None.
-            if event.owner is None and seen["ours"]:
+            # Another client owns the selection now: its window is foreign (or unknown).
+            owner = event.owner
+            if owner is None or owner.get_window_type() == Gdk.WindowType.FOREIGN:
                 self.release("clipboard")
-            seen["ours"] = True
 
         cb.connect("owner-change", on_owner_change)
         GLib.timeout_add_seconds(3600, lambda: self.release("clipboard"))
 
     # -- screencast --------------------------------------------------------
 
-    def record(self, target, pointer=True, audio=False, delay=0, output=None, fps=30):
+    def record(self, target, pointer=True, audio=False, delay=0, output=None, fps=30, preview=True):
         if read_pid() is not None:
             notify(APP_NAME, "이미 녹화 중입니다.", "dialog-warning")
             self.quit(1)
@@ -600,17 +772,30 @@ class App:
 
         def go():
             self.choose_target(target, False,
-                               lambda rect, _frozen: self.start_recording(rect, pointer, audio, output, fps))
+                               lambda rect, _frozen: self.start_recording(rect, pointer, audio, output, fps,
+                                                                          preview, target != "all"))
             return False
         GLib.timeout_add(max(int(delay * 1000), 1), go)
 
-    def start_recording(self, rect, pointer, audio, output, fps):
+    def start_recording(self, rect, pointer, audio, output, fps, preview, frame):
         if rect is None:
-            self.quit(1)
+            if self.dialog_settings:
+                self.show_dialog()
+            else:
+                self.quit(1)
             return
         x, y, w, h = rect
         w, h = w - w % 2, h - h % 2  # yuv420p needs even dimensions
-        path = output or default_output(video=True)
+        self.rec_target = output or default_output(video=True)
+        self.rec_preview = preview and VideoPreviewWindow.available()
+        if self.rec_preview:
+            # Record to a scratch file; the preview decides where (or whether) it is kept.
+            cache = os.path.join(GLib.get_user_cache_dir(), APP_ID)
+            os.makedirs(cache, exist_ok=True)
+            fd, path = tempfile.mkstemp(prefix="recording-", suffix=".mp4", dir=cache)
+            os.close(fd)
+        else:
+            path = self.rec_target
         cmd = ["ffmpeg", "-loglevel", "error", "-y",
                "-thread_queue_size", "512", "-f", "x11grab",
                "-draw_mouse", "1" if pointer else "0", "-framerate", str(fps),
@@ -625,6 +810,10 @@ class App:
         cmd += ["-movflags", "+faststart", path]
 
         self.rec_path = path
+        self.rec_size = (w, h)
+        self.rec_frame = RecordingFrame((x, y, w, h)) if frame else None
+        if self.rec_frame is not None:
+            self.rec_frame.show_all()
         self.rec_started = GLib.get_monotonic_time()
         self.ffmpeg = subprocess.Popen(cmd, stdin=subprocess.PIPE)
         self.keep_alive = True
@@ -676,13 +865,21 @@ class App:
         clear_pid()
         if self.indicator is not None:
             self.indicator.set_status(AppIndicator.IndicatorStatus.PASSIVE)
-        if os.path.exists(self.rec_path) and os.path.getsize(self.rec_path) > 0:
+        if self.rec_frame is not None:
+            self.rec_frame.destroy()
+            self.rec_frame = None
+        if not (os.path.exists(self.rec_path) and os.path.getsize(self.rec_path) > 0):
+            notify(APP_NAME, "녹화에 실패했습니다.", "dialog-error")
+            self.quit(1)
+            return
+        if self.rec_preview:
+            self.pending.add("preview")
+            VideoPreviewWindow(self.rec_path, self.rec_target, self.rec_size,
+                               lambda: self.preview_closed()).show_all()
+        else:
             print(self.rec_path)
             notify("화면 녹화를 저장했습니다", self.rec_path, "video-x-generic")
             self.quit(0)
-        else:
-            notify(APP_NAME, "녹화에 실패했습니다.", "dialog-error")
-            self.quit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -736,7 +933,8 @@ DIALOG_CSS = b"""
     outline-color: transparent;
 }
 .snapshot-panel button:hover { background-color: #44444a; }
-.snapshot-panel button:checked { background-color: #3584e4; }
+.snapshot-panel button:checked,
+.snapshot-panel button.active { background-color: #3584e4; }
 .snapshot-panel button:checked:hover { background-color: #4a92ea; }
 .snapshot-panel button image { color: #ffffff; }
 .target {
@@ -746,7 +944,7 @@ DIALOG_CSS = b"""
 }
 .target label { font-size: 13px; }
 .chip { border-radius: 999px; min-width: 36px; min-height: 36px; padding: 0; }
-.chip.delay { padding: 0 12px; }
+.chip.delay label { font-weight: bold; font-size: 14px; }
 .mode button { min-width: 44px; min-height: 36px; padding: 0; }
 .mode button:first-child { border-radius: 999px 0 0 999px; }
 .mode button:last-child { border-radius: 0 999px 999px 0; }
@@ -774,7 +972,7 @@ class CaptureDialog(Gtk.Window):
 
     BOTTOM_MARGIN = 80
 
-    def __init__(self, app, video=False, target="screen", pointer=False, delay=0):
+    def __init__(self, app, video=False, target="screen", pointer=False, delay=0, audio=False):
         super().__init__(title=APP_NAME)
         self.app = app
         self.set_resizable(False)
@@ -846,6 +1044,7 @@ class CaptureDialog(Gtk.Window):
         self.pointer_chk.set_active(pointer)
         options.pack_start(self.pointer_chk, False, False, 0)
         self.audio_chk = self.icon_button("audio-volume-high-symbolic", "시스템 소리 녹음", "chip", toggle=True)
+        self.audio_chk.set_active(audio)
         self.audio_chk.get_child().show()
         self.audio_chk.set_no_show_all(True)
         options.pack_start(self.audio_chk, False, False, 0)
@@ -855,11 +1054,15 @@ class CaptureDialog(Gtk.Window):
         self.delay_btn.get_style_context().add_class("delay")
         self.delay_btn.set_tooltip_text("지연 시간")
         self.delay_btn.set_valign(Gtk.Align.CENTER)
-        delay_inner = Gtk.Box(spacing=6)
-        delay_inner.pack_start(Gtk.Image.new_from_icon_name("alarm-symbolic", Gtk.IconSize.BUTTON), False, False, 0)
+        # Timer icon when off, otherwise just the number of seconds in the same round chip.
+        self.delay_stack = Gtk.Stack()
+        timer_icon = Gtk.Image.new_from_icon_name("alarm-symbolic", Gtk.IconSize.BUTTON)
+        timer_icon.show()
+        self.delay_stack.add_named(timer_icon, "off")
         self.delay_label = Gtk.Label()
-        delay_inner.pack_start(self.delay_label, False, False, 0)
-        self.delay_btn.add(delay_inner)
+        self.delay_label.show()
+        self.delay_stack.add_named(self.delay_label, "on")
+        self.delay_btn.add(self.delay_stack)
         self.delay_btn.connect("clicked", self.cycle_delay)
         options.pack_start(self.delay_btn, False, False, 0)
         bar.pack_start(options, False, False, 0)
@@ -919,7 +1122,11 @@ class CaptureDialog(Gtk.Window):
         self.update_delay_label()
 
     def update_delay_label(self):
-        self.delay_label.set_text(f"{self.delay}초" if self.delay else "바로")
+        self.delay_label.set_text(str(self.delay))
+        self.delay_stack.set_visible_child_name("on" if self.delay else "off")
+        self.delay_btn.set_tooltip_text(f"지연 시간: {self.delay}초" if self.delay else "지연 시간: 없음")
+        ctx = self.delay_btn.get_style_context()
+        (ctx.add_class if self.delay else ctx.remove_class)("active")
 
     def close_dialog(self):
         self.destroy()
@@ -958,7 +1165,8 @@ class CaptureDialog(Gtk.Window):
         video = self.video_btn.get_active()
         audio = self.audio_chk.get_active()
         self.app.pending.discard("dialog")
-        self.app.dialog_settings = None if video else {"target": target, "pointer": pointer, "delay": delay}
+        self.app.dialog_settings = {"target": target, "pointer": pointer, "delay": delay,
+                                    "video": video, "audio": audio}
         self.destroy()
 
         # Wait for the dialog to disappear from the screen before grabbing.
@@ -997,6 +1205,7 @@ def parse_args(argv):
     rec.add_argument("-d", "--delay", type=float, default=0)
     rec.add_argument("-o", "--output")
     rec.add_argument("--fps", type=int, default=30)
+    rec.add_argument("--no-preview", action="store_true", help="save directly without the preview window")
 
     sub.add_parser("stop", help="stop the running screencast")
     sub.add_parser("toggle-record", help="stop if recording, otherwise open the dialog in screencast mode")
@@ -1046,7 +1255,7 @@ def main(argv=None):
                        preview=not args.no_preview)
     elif cmd == "record":
         app.record(args.target, pointer=not args.no_pointer, audio=args.audio,
-                   delay=args.delay, output=args.output, fps=args.fps)
+                   delay=args.delay, output=args.output, fps=args.fps, preview=not args.no_preview)
 
     Gtk.main()
     return app.exit_code
