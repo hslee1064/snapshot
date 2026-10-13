@@ -26,15 +26,6 @@ gi.require_version("Wnck", "3.0")
 gi.require_version("Notify", "0.7")
 from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Notify, Wnck  # noqa: E402
 
-try:
-    gi.require_version("AyatanaAppIndicator3", "0.1")
-    from gi.repository import AyatanaAppIndicator3 as AppIndicator  # noqa: E402
-except (ValueError, ImportError):
-    try:
-        gi.require_version("AppIndicator3", "0.1")
-        from gi.repository import AppIndicator3 as AppIndicator  # noqa: E402
-    except (ValueError, ImportError):
-        AppIndicator = None
 
 APP_ID = "snapshot"
 APP_NAME = "Snapshot"
@@ -466,6 +457,99 @@ class PreviewWindow(Gtk.Window):
         return path
 
 
+SNI_XML = """
+<node>
+  <interface name="org.kde.StatusNotifierItem">
+    <property name="Category" type="s" access="read"/>
+    <property name="Id" type="s" access="read"/>
+    <property name="Title" type="s" access="read"/>
+    <property name="Status" type="s" access="read"/>
+    <property name="IconName" type="s" access="read"/>
+    <property name="ToolTip" type="(sa(iiay)ss)" access="read"/>
+    <property name="ItemIsMenu" type="b" access="read"/>
+    <property name="Menu" type="o" access="read"/>
+    <property name="XAyatanaLabel" type="s" access="read"/>
+    <method name="Activate"><arg name="x" type="i" direction="in"/><arg name="y" type="i" direction="in"/></method>
+    <method name="SecondaryActivate"><arg name="x" type="i" direction="in"/><arg name="y" type="i" direction="in"/></method>
+    <method name="ContextMenu"><arg name="x" type="i" direction="in"/><arg name="y" type="i" direction="in"/></method>
+    <method name="Scroll"><arg name="delta" type="i" direction="in"/><arg name="orientation" type="s" direction="in"/></method>
+    <signal name="NewTitle"/>
+    <signal name="NewToolTip"/>
+    <signal name="XAyatanaNewLabel"><arg type="s"/><arg type="s"/></signal>
+  </interface>
+</node>
+"""
+
+
+class RecordingIndicator:
+    """Top-bar recording badge (StatusNotifierItem) that stops the recording on click.
+
+    It uses its own bus connection and a per-recording Id, so closing the connection
+    removes the item and a leftover item from an earlier recording can't shadow it.
+    """
+
+    PATH = "/StatusNotifierItem"
+
+    def __init__(self, on_click):
+        self.on_click = on_click
+        self.label = "00:00"
+        self.conn = None
+        try:
+            address = Gio.dbus_address_get_for_bus_sync(Gio.BusType.SESSION, None)
+            self.conn = Gio.DBusConnection.new_for_address_sync(
+                address, Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
+                | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION, None, None)
+            info = Gio.DBusNodeInfo.new_for_xml(SNI_XML).interfaces[0]
+            self.conn.register_object(self.PATH, info, self.on_call, self.on_get, None)
+            self.conn.call_sync("org.kde.StatusNotifierWatcher", "/StatusNotifierWatcher",
+                                "org.kde.StatusNotifierWatcher", "RegisterStatusNotifierItem",
+                                GLib.Variant("(s)", (self.conn.get_unique_name(),)),
+                                None, Gio.DBusCallFlags.NONE, 2000, None)
+        except GLib.Error as exc:
+            print(f"tray indicator unavailable: {exc.message}", file=sys.stderr)
+            self.close()
+
+    def on_get(self, _conn, _sender, _path, _iface, prop):
+        tooltip = ("media-record", [], "화면 녹화 중", f"{self.label} · 클릭하면 녹화를 중지합니다")
+        values = {
+            "Category": GLib.Variant("s", "ApplicationStatus"),
+            "Id": GLib.Variant("s", f"{APP_ID}-recording-{os.getpid()}-{id(self)}"),
+            "Title": GLib.Variant("s", "화면 녹화 중지"),
+            "Status": GLib.Variant("s", "Active"),
+            "IconName": GLib.Variant("s", "media-record"),
+            "ToolTip": GLib.Variant("(sa(iiay)ss)", tooltip),
+            "ItemIsMenu": GLib.Variant("b", False),
+            "Menu": GLib.Variant("o", "/NO_DBUSMENU"),
+            "XAyatanaLabel": GLib.Variant("s", self.label),
+        }
+        return values.get(prop)
+
+    def on_call(self, _conn, _sender, _path, _iface, method, _params, invocation):
+        invocation.return_value(None)
+        # Any click on the badge (left, middle or right) stops the recording.
+        if method in ("Activate", "SecondaryActivate", "ContextMenu"):
+            GLib.idle_add(lambda: (self.on_click(), False)[1])
+
+    def set_elapsed(self, text):
+        self.label = text
+        if self.conn is None:
+            return
+        for signal_name, params in (("XAyatanaNewLabel", GLib.Variant("(ss)", (text, "00:00"))),
+                                    ("NewToolTip", None)):
+            try:
+                self.conn.emit_signal(None, self.PATH, "org.kde.StatusNotifierItem", signal_name, params)
+            except GLib.Error:
+                pass
+
+    def close(self):
+        if self.conn is not None:
+            try:
+                self.conn.close_sync(None)
+            except GLib.Error:
+                pass
+            self.conn = None
+
+
 class EscapeGrab:
     """Grab Escape on the X root window so it stops a recording from any app."""
 
@@ -573,7 +657,9 @@ class VideoPreviewWindow(Gtk.Window):
 
     def __init__(self, temp_path, target_path, size, on_close):
         super().__init__(title="화면 녹화")
+        gi.require_version("Gst", "1.0")
         from gi.repository import Gst
+        Gst.init(None)
         self.Gst = Gst
         self.temp_path = temp_path
         self.target_path = target_path
@@ -607,12 +693,23 @@ class VideoPreviewWindow(Gtk.Window):
         bus.add_signal_watch()
         bus.connect("message::eos", self.on_eos)
 
+        controls = Gtk.Box(spacing=8)
+        self.play_btn = self.player_button("media-playback-start-symbolic", "재생", lambda: self.set_playing(True))
+        self.pause_btn = self.player_button("media-playback-pause-symbolic", "일시정지",
+                                            lambda: self.set_playing(False))
+        controls.pack_start(self.play_btn, False, False, 0)
+        controls.pack_start(self.pause_btn, False, False, 0)
+        self.pos_label = Gtk.Label(label="00:00")
+        controls.pack_start(self.pos_label, False, False, 0)
+        self.seek = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 1, 0.1)
+        self.seek.set_draw_value(False)
+        self.seek.connect("change-value", self.on_seek)
+        controls.pack_start(self.seek, True, True, 0)
+        self.dur_label = Gtk.Label(label="00:00")
+        controls.pack_start(self.dur_label, False, False, 0)
+        box.pack_start(controls, False, False, 0)
+
         actions = Gtk.Box(spacing=8)
-        self.play_btn = Gtk.Button()
-        self.play_img = Gtk.Image.new_from_icon_name("media-playback-pause-symbolic", Gtk.IconSize.BUTTON)
-        self.play_btn.add(self.play_img)
-        self.play_btn.connect("clicked", lambda *_: self.toggle_play())
-        actions.pack_start(self.play_btn, False, False, 0)
         name = Gtk.Label(label=os.path.basename(target_path), selectable=True)
         name.set_ellipsize(2)  # Pango.EllipsizeMode.MIDDLE
         actions.set_center_widget(name)
@@ -622,21 +719,70 @@ class VideoPreviewWindow(Gtk.Window):
         actions.pack_end(save, False, False, 0)
         box.pack_start(actions, False, False, 0)
 
-        self.playing = True
-        self.player.set_state(Gst.State.PLAYING)
+        self.duration = 0
+        self.at_end = False
+        self.pending_seek = None
+        self.set_playing(True)
+        self.progress_timer = GLib.timeout_add(100, self.update_progress)
+
+    @staticmethod
+    def player_button(icon, tooltip, callback):
+        btn = Gtk.Button()
+        btn.add(Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.BUTTON))
+        btn.set_tooltip_text(tooltip)
+        btn.connect("clicked", lambda *_: callback())
+        return btn
+
+    def set_playing(self, playing):
+        if playing and self.at_end:
+            self.seek_to(0)
+        self.playing = playing
+        self.player.set_state(self.Gst.State.PLAYING if playing else self.Gst.State.PAUSED)
+        self.play_btn.set_sensitive(not playing)
+        self.pause_btn.set_sensitive(playing)
 
     def toggle_play(self):
-        self.playing = not self.playing
-        self.player.set_state(self.Gst.State.PLAYING if self.playing else self.Gst.State.PAUSED)
-        self.play_img.set_from_icon_name(
-            "media-playback-pause-symbolic" if self.playing else "media-playback-start-symbolic",
-            Gtk.IconSize.BUTTON)
+        self.set_playing(not self.playing)
+
+    def seek_to(self, seconds):
+        self.at_end = False
+        ok = self.player.seek_simple(self.Gst.Format.TIME,
+                                     self.Gst.SeekFlags.FLUSH | self.Gst.SeekFlags.ACCURATE,
+                                     int(seconds * self.Gst.SECOND))
+        # Seeking fails until the pipeline has prerolled; retry from update_progress.
+        self.pending_seek = None if ok else seconds
+
+    def on_seek(self, _scale, _scroll, value):
+        self.seek_to(min(max(value, 0), self.duration or value))
+        self.pos_label.set_text(self.fmt(value))
+        return False
+
+    @staticmethod
+    def fmt(seconds):
+        seconds = int(max(seconds, 0))
+        return f"{seconds // 60:02d}:{seconds % 60:02d}"
+
+    def update_progress(self):
+        ok, dur = self.player.query_duration(self.Gst.Format.TIME)
+        if ok and dur > 0 and not self.duration:
+            self.duration = dur / self.Gst.SECOND
+            self.seek.set_range(0, self.duration)
+            self.dur_label.set_text(self.fmt(self.duration))
+        ok, pos = self.player.query_position(self.Gst.Format.TIME)
+        if ok and self.pending_seek is not None:
+            self.seek_to(self.pending_seek)
+            return True
+        if ok and not self.at_end:
+            self.seek.set_value(pos / self.Gst.SECOND)
+            self.pos_label.set_text(self.fmt(pos / self.Gst.SECOND))
+        return True
 
     def on_eos(self, *_):
-        # Rewind and pause on the first frame so it can be replayed.
-        self.player.seek_simple(self.Gst.Format.TIME, self.Gst.SeekFlags.FLUSH, 0)
-        if self.playing:
-            self.toggle_play()
+        # Stay on the last frame; pressing play starts over from the beginning.
+        self.at_end = True
+        self.seek.set_value(self.duration)
+        self.pos_label.set_text(self.fmt(self.duration))
+        self.set_playing(False)
 
     def on_key(self, _w, event):
         ctrl = event.state & Gdk.ModifierType.CONTROL_MASK
@@ -652,8 +798,7 @@ class VideoPreviewWindow(Gtk.Window):
         return True
 
     def save_as(self):
-        if self.playing:
-            self.toggle_play()
+        self.set_playing(False)
         dialog = Gtk.FileChooserDialog(title="화면 녹화 저장", parent=self, action=Gtk.FileChooserAction.SAVE)
         dialog.add_buttons("취소", Gtk.ResponseType.CANCEL, "저장", Gtk.ResponseType.ACCEPT)
         dialog.set_do_overwrite_confirmation(True)
@@ -679,6 +824,7 @@ class VideoPreviewWindow(Gtk.Window):
         self.destroy()
 
     def on_destroy(self, *_):
+        GLib.source_remove(self.progress_timer)
         self.player.set_state(self.Gst.State.NULL)
         if not self.saved:
             try:
@@ -874,24 +1020,11 @@ class App:
             GLib.unix_signal_add(GLib.PRIORITY_HIGH, sig, self.stop_recording)
         self.setup_indicator()
         self.esc_grab = EscapeGrab(self.stop_recording)
-        notify("화면 녹화를 시작했습니다", "Esc 키나 상단 표시줄의 Snapshot 아이콘으로 중지하세요.",
+        notify("화면 녹화를 시작했습니다", "Esc 키를 누르거나 상단 표시줄의 녹화 표시를 클릭하면 중지됩니다.",
                "media-record")
 
     def setup_indicator(self):
-        self.indicator = None
-        if AppIndicator is None:
-            return
-        ind = AppIndicator.Indicator.new(APP_ID, "media-record",
-                                         AppIndicator.IndicatorCategory.APPLICATION_STATUS)
-        ind.set_status(AppIndicator.IndicatorStatus.ACTIVE)
-        menu = Gtk.Menu()
-        self.stop_item = Gtk.MenuItem(label="녹화 중지 (00:00)")
-        self.stop_item.connect("activate", lambda *_: self.stop_recording())
-        menu.append(self.stop_item)
-        menu.show_all()
-        ind.set_menu(menu)
-        ind.set_secondary_activate_target(self.stop_item)
-        self.indicator = ind
+        self.indicator = RecordingIndicator(self.stop_recording)
         GLib.timeout_add_seconds(1, self.tick)
         self.tick()
 
@@ -899,9 +1032,7 @@ class App:
         if self.ffmpeg.poll() is not None:
             return False
         secs = (GLib.get_monotonic_time() - self.rec_started) // 1_000_000
-        text = f"{secs // 60:02d}:{secs % 60:02d}"
-        self.stop_item.set_label(f"녹화 중지 ({text})")
-        self.indicator.set_label(text, "00:00")
+        self.indicator.set_elapsed(f"{secs // 60:02d}:{secs % 60:02d}")
         return True
 
     def stop_recording(self, *_):
@@ -916,8 +1047,7 @@ class App:
     def on_ffmpeg_exit(self, _pid, status):
         clear_pid()
         self.esc_grab.release()
-        if self.indicator is not None:
-            self.indicator.set_status(AppIndicator.IndicatorStatus.PASSIVE)
+        self.indicator.close()
         if self.rec_frame is not None:
             self.rec_frame.destroy()
             self.rec_frame = None

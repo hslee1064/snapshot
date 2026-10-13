@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 DEPS=(ffmpeg python3-gi python3-xlib gir1.2-gtk-3.0 gir1.2-wnck-3.0
-      gir1.2-notify-0.7 gir1.2-ayatanaappindicator3-0.1 pulseaudio-utils xdg-user-dirs)
+      gir1.2-notify-0.7 gir1.2-gstreamer-1.0 gstreamer1.0-gtk3 gstreamer1.0-libav pulseaudio-utils xdg-user-dirs)
 
 for arg in "$@"; do
   case "$arg" in
