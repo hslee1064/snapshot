@@ -1,0 +1,44 @@
+# BlueSnap
+
+Ubuntu 24.04 기본 스크린샷 도구와 같은 기능을 하는 캡처 도구입니다 (X11 세션 전용).
+
+- **대상**: 선택 영역 / 창 / 화면(포인터가 있는 모니터) / 전체(모든 모니터, CLI `all`)
+- **스크린샷**: PNG로 `~/Pictures/Screenshots/`에 저장하고 클립보드에 복사
+- **화면 녹화**: MP4(H.264, 선택 시 시스템 소리 AAC)로 `~/Videos/Screencasts/`에 저장,
+  녹화 중에는 상단 표시줄 아이콘에 경과 시간이 표시되고 메뉴에서 중지
+
+## 설치
+
+```bash
+./install.sh --deps --shortcuts   # 의존성(apt) + 앱 + 단축키
+./install.sh                      # 앱만
+./uninstall.sh                    # 제거
+```
+
+## 사용
+
+| 명령 | 동작 |
+|---|---|
+| `bluesnap` | 캡처 창 열기 (S/C/W 대상, V 모드 전환, Enter 캡처) |
+| `bluesnap shot area\|window\|screen\|all [-p] [-d 초] [-o 파일]` | 스크린샷 |
+| `bluesnap record area\|window\|screen\|all [-a] [--no-pointer] [--fps 30]` | 녹화 시작 |
+| `bluesnap stop` | 녹화 중지 |
+| `bluesnap toggle-record` | 녹화 중이면 중지, 아니면 녹화 모드로 창 열기 |
+
+선택 화면에서 Esc나 오른쪽 클릭으로 취소합니다.
+
+## 기본 단축키 (`--shortcuts`)
+
+| 키 | 동작 |
+|---|---|
+| Super+Shift+S | 캡처 창 |
+| Ctrl+Shift+Print | 선택 영역 스크린샷 |
+| Ctrl+Alt+Print | 창 스크린샷 |
+| Ctrl+Shift+Alt+R | 녹화 시작/중지 |
+
+Ubuntu 기본 Print 키와 겹치지 않게 잡았습니다. 바꾸려면 `shortcuts.sh`의 목록을 고친 뒤 다시 실행하세요.
+
+## 제약
+
+Wayland 세션에서는 ffmpeg x11grab을 쓸 수 없어 동작하지 않습니다.
+로그인 화면에서 "Ubuntu on Xorg"를 선택하세요.

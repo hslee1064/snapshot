@@ -1,0 +1,32 @@
+[Desktop Entry]
+Type=Application
+Name=BlueSnap
+Name[ko]=BlueSnap 스크린샷
+Comment=Take screenshots and screencasts of an area, a window or the screen
+Comment[ko]=선택 영역·창·화면 스크린샷 및 화면 녹화
+Exec=bluesnap ui
+Icon=applets-screenshooter
+Terminal=false
+Categories=Graphics;
+Keywords=screenshot;screencast;capture;record;스크린샷;녹화;
+Actions=Area;Window;Screen;Record;
+
+[Desktop Action Area]
+Name=Screenshot of selection
+Name[ko]=선택 영역 스크린샷
+Exec=bluesnap shot area
+
+[Desktop Action Window]
+Name=Screenshot of window
+Name[ko]=창 스크린샷
+Exec=bluesnap shot window
+
+[Desktop Action Screen]
+Name=Screenshot of screen
+Name[ko]=화면 스크린샷
+Exec=bluesnap shot screen
+
+[Desktop Action Record]
+Name=Record screen
+Name[ko]=화면 녹화
+Exec=bluesnap ui --video
