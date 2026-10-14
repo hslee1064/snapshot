@@ -21,10 +21,11 @@ import gi
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
+gi.require_version("GdkX11", "3.0")
 gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Wnck", "3.0")
 gi.require_version("Notify", "0.7")
-from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Notify, Wnck  # noqa: E402
+from gi.repository import Gdk, GdkPixbuf, GdkX11, Gio, GLib, Gtk, Notify, Wnck  # noqa: E402
 
 
 APP_ID = "snapshot"
@@ -1443,6 +1444,10 @@ class CaptureDialog(Gtk.Window):
         self.connect("delete-event", lambda *_: app.dialog_closed())
         self.connect("size-allocate", self.place)
         self.connect("key-press-event", self.on_key)
+        # Losing focus (e.g. a click outside the panel) dismisses it. Take focus
+        # explicitly on map, since a shortcut launch may not hand it to us.
+        self.connect("map-event", self.take_focus)
+        self.connect("focus-out-event", lambda *_: GLib.idle_add(self.dismiss_if_unfocused))
 
         # Transparent window so the panel's rounded corners show.
         visual = self.get_screen().get_rgba_visual()
@@ -1588,6 +1593,16 @@ class CaptureDialog(Gtk.Window):
         self.delay_btn.set_tooltip_text(f"지연 시간: {self.delay}초" if self.delay else "지연 시간: 없음")
         ctx = self.delay_btn.get_style_context()
         (ctx.add_class if self.delay else ctx.remove_class)("active")
+
+    def take_focus(self, *_):
+        window = self.get_window()
+        window.focus(GdkX11.x11_get_server_time(window))
+        return False
+
+    def dismiss_if_unfocused(self):
+        if self.get_realized() and not self.is_active():
+            self.close_dialog()
+        return False
 
     def close_dialog(self):
         self.destroy()
