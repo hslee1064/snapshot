@@ -50,11 +50,10 @@ def xdg_dir(kind, fallback):
 
 def default_output(video):
     now = datetime.datetime.now().strftime("%Y-%m-%d %H-%M-%S")
+    folder = xdg_dir("DOWNLOAD", "~/Downloads")
     if video:
-        folder = os.path.join(xdg_dir("VIDEOS", "~/Videos"), "Screencasts")
         name = f"Screencast from {now}.mp4"
     else:
-        folder = os.path.join(xdg_dir("PICTURES", "~/Pictures"), "Screenshots")
         name = f"Screenshot from {now}.png"
     os.makedirs(folder, exist_ok=True)
     return os.path.join(folder, name)
