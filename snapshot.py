@@ -1446,8 +1446,11 @@ class CaptureDialog(Gtk.Window):
         self.connect("key-press-event", self.on_key)
         # Losing focus (e.g. a click outside the panel) dismisses it. Take focus
         # explicitly on map, since a shortcut launch may not hand it to us.
+        # GTK doesn't always report the focus loss, so watch the active window instead.
         self.connect("map-event", self.take_focus)
-        self.connect("focus-out-event", lambda *_: GLib.idle_add(self.dismiss_if_unfocused))
+        self.wnck = Wnck.Screen.get_default()
+        self.wnck_handler = self.wnck.connect("active-window-changed", self.on_active_changed)
+        self.connect("destroy", lambda *_: self.wnck.disconnect(self.wnck_handler))
 
         # Transparent window so the panel's rounded corners show.
         visual = self.get_screen().get_rgba_visual()
@@ -1599,10 +1602,14 @@ class CaptureDialog(Gtk.Window):
         window.focus(GdkX11.x11_get_server_time(window))
         return False
 
-    def dismiss_if_unfocused(self):
-        if self.get_realized() and not self.is_active():
+    def on_active_changed(self, screen, _previous):
+        active = screen.get_active_window()
+        if not self.get_realized() or active is None:
+            return
+        if active.get_xid() == self.get_window().get_xid():
+            self.had_focus = True
+        elif getattr(self, "had_focus", False):
             self.close_dialog()
-        return False
 
     def close_dialog(self):
         self.destroy()
