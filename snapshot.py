@@ -232,6 +232,18 @@ def portal_screenshot(interactive=False):
             pass
 
 
+def without_alpha(pixbuf):
+    """Opaque RGB copy. Portal grabs are RGBA, and Windows apps (Wine, Remmina's RDP
+    clipboard) mishandle the 32-bit alpha BMP that GTK would offer for them."""
+    if not pixbuf.get_has_alpha():
+        return pixbuf
+    w, h = pixbuf.get_width(), pixbuf.get_height()
+    rgb = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8, w, h)
+    rgb.fill(0x000000ff)
+    pixbuf.composite(rgb, 0, 0, w, h, 0, 0, 1, 1, GdkPixbuf.InterpType.NEAREST, 255)
+    return rgb
+
+
 def load_tokens():
     try:
         with open(TOKEN_FILE) as f:
@@ -1229,7 +1241,7 @@ class App:
                 self.quit(1)
             return
         x, y, w, h = rect
-        pixbuf = frozen.new_subpixbuf(x, y, w, h).copy()
+        pixbuf = without_alpha(frozen.new_subpixbuf(x, y, w, h))
         path = output or default_output(video=False)
         if preview:
             # Nothing is written yet; the preview window saves on request.
