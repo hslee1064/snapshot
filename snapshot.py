@@ -395,6 +395,9 @@ class SelectionOverlay(Gtk.Window):
         self.area = area
 
     def present_and_grab(self):
+        # Mapped XWayland windows show an unpainted (opaque) frame first; keep the
+        # overlay invisible until its first translucent frame is drawn.
+        self.set_opacity(0)
         self.show_all()
         gdk_win = self.get_window()
         cursor = Gdk.Cursor.new_for_display(Gdk.Display.get_default(), Gdk.CursorType.CROSSHAIR)
@@ -425,6 +428,8 @@ class SelectionOverlay(Gtk.Window):
         cr.set_source_rgba(0, 0, 0, 0)
         cr.paint()
         cr.set_operator(cairo.OPERATOR_OVER)
+        if self.get_opacity() < 1:
+            GLib.idle_add(lambda: self.set_opacity(1))
 
         width, height = widget.get_allocated_width(), widget.get_allocated_height()
         sel = self.selection_logical()
