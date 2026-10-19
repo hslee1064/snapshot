@@ -1,10 +1,12 @@
 #!/usr/bin/python3
-"""Snapshot - a GNOME-style screenshot / screencast tool for Ubuntu (X11).
+"""Snapshot - a GNOME-style screenshot / screencast tool for Ubuntu (GNOME on Wayland).
 
 Targets: selection (area), window, screen (monitor under pointer), all (every monitor).
-Screenshots are grabbed with ffmpeg x11grab (so the pointer can be included),
-frozen on an overlay for selection, saved as PNG and copied to the clipboard.
-Screencasts are recorded with ffmpeg x11grab (+ optional PulseAudio monitor) to MP4.
+Screenshots come from the xdg-desktop-portal Screenshot API, frozen on an overlay
+for selection, saved as PNG and copied to the clipboard.
+Screencasts are recorded from the portal ScreenCast PipeWire stream with GStreamer
+(+ optional PulseAudio monitor) to MP4. The UI itself runs through XWayland so the
+overlays can be placed on screen.
 """
 
 import argparse
@@ -16,20 +18,24 @@ import subprocess
 import sys
 import tempfile
 
+import json
+
 import cairo
 import gi
 
+# Wayland doesn't let clients place their own windows; the overlays need XWayland.
+os.environ["GDK_BACKEND"] = "x11"
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 gi.require_version("GdkX11", "3.0")
 gi.require_version("GdkPixbuf", "2.0")
-gi.require_version("Wnck", "3.0")
 gi.require_version("Notify", "0.7")
-from gi.repository import Gdk, GdkPixbuf, GdkX11, Gio, GLib, Gtk, Notify, Wnck  # noqa: E402
+from gi.repository import Gdk, GdkPixbuf, GdkX11, Gio, GLib, Gtk, Notify  # noqa: E402
 
 
 APP_ID = "snapshot"
 APP_NAME = "Snapshot"
+TOKEN_FILE = os.path.join(GLib.get_user_config_dir(), APP_ID, "screencast-tokens.json")
 RUNTIME_DIR = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
 PID_FILE = os.path.join(RUNTIME_DIR, "snapshot-record.pid")
 TARGETS = ("area", "window", "screen", "all")
@@ -58,10 +64,6 @@ def default_output(video):
         name = f"Screenshot from {now}.png"
     os.makedirs(folder, exist_ok=True)
     return os.path.join(folder, name)
-
-
-def display_name():
-    return os.environ.get("DISPLAY", ":0")
 
 
 def scale_factor():
@@ -135,6 +137,8 @@ def run_notify_saved(path, summary, icon, extra):
 
 
 def notify(summary, body="", icon="camera-photo"):
+    if not Notify.is_initted():
+        Notify.init(APP_NAME)
     try:
         n = Notify.Notification.new(summary, body, icon)
         n.set_hint("desktop-entry", GLib.Variant("s", APP_ID))
@@ -144,46 +148,186 @@ def notify(summary, body="", icon="camera-photo"):
 
 
 def check_session():
-    if os.environ.get("XDG_SESSION_TYPE") == "wayland" or not os.environ.get("DISPLAY"):
-        msg = ("Snapshot은 X11(Ubuntu on Xorg) 세션에서만 동작합니다.\n"
-               "로그인 화면 우측 하단 톱니바퀴에서 'Ubuntu on Xorg'를 선택하세요.")
+    if not os.environ.get("DISPLAY"):
+        msg = "XWayland(DISPLAY)를 찾을 수 없습니다. GNOME 세션에서 실행하세요."
         print(msg, file=sys.stderr)
         notify(APP_NAME, msg, "dialog-error")
         return False
-    if not shutil.which("ffmpeg"):
-        print("ffmpeg가 필요합니다: sudo apt install ffmpeg", file=sys.stderr)
-        return False
+    for tool, pkg in (("ffmpeg", "ffmpeg"), ("gst-launch-1.0", "gstreamer1.0-tools")):
+        if not shutil.which(tool):
+            print(f"{tool}가 필요합니다: sudo apt install {pkg}", file=sys.stderr)
+            return False
     return True
 
 
-def grab_root(path, pointer):
-    """Grab the whole X root window into a PNG using ffmpeg."""
-    w, h = root_size()
-    cmd = ["ffmpeg", "-loglevel", "error", "-y", "-f", "x11grab",
-           "-draw_mouse", "1" if pointer else "0",
-           "-video_size", f"{w}x{h}", "-i", f"{display_name()}+0,0",
-           "-frames:v", "1", path]
-    subprocess.run(cmd, check=True)
+# ---------------------------------------------------------------------------
+# xdg-desktop-portal
+# ---------------------------------------------------------------------------
+
+PORTAL_NAME = "org.freedesktop.portal.Desktop"
+PORTAL_PATH = "/org/freedesktop/portal/desktop"
 
 
-def visible_windows():
-    """Visible top-level windows, topmost first, as (title, (x, y, w, h)) in physical px."""
-    screen = Wnck.Screen.get_default()
-    screen.force_update()
-    ws = screen.get_active_workspace()
-    allowed = {Wnck.WindowType.NORMAL, Wnck.WindowType.DIALOG,
-               Wnck.WindowType.UTILITY, Wnck.WindowType.MENU}
-    result = []
-    for win in reversed(screen.get_windows_stacked()):
-        if win.is_minimized() or win.get_window_type() not in allowed:
-            continue
-        if ws is not None and not win.is_visible_on_workspace(ws):
-            continue
-        # Mutter already reports the visible frame (CSD shadows excluded), so use it as is.
-        rect = tuple(win.get_geometry())
-        if rect[2] > 0 and rect[3] > 0:
-            result.append((win.get_name(), rect))
-    return result
+class PortalCancelled(Exception):
+    pass
+
+
+class Portal:
+    """Blocking wrapper around portal Request/Response calls (runs a nested main loop)."""
+
+    count = 0
+
+    def __init__(self):
+        # A private connection: the shared one may predate detach()'s fork and lack its worker thread.
+        address = Gio.dbus_address_get_for_bus_sync(Gio.BusType.SESSION, None)
+        self.bus = Gio.DBusConnection.new_for_address_sync(
+            address, Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
+            | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION, None, None)
+        self.sender = self.bus.get_unique_name()[1:].replace(".", "_")
+
+    def token(self):
+        Portal.count += 1
+        return f"snapshot_{os.getpid()}_{Portal.count}"
+
+    def request(self, iface, method, args, options):
+        """args: [(signature, value)]. Returns the results dict; raises PortalCancelled / GLib.Error."""
+        token = self.token()
+        path = f"{PORTAL_PATH}/request/{self.sender}/{token}"
+        loop = GLib.MainLoop()
+        response = []
+
+        def on_response(_conn, _sender, _path, _iface, _signal, params):
+            response.extend(params.unpack())
+            loop.quit()
+
+        sub = self.bus.signal_subscribe(PORTAL_NAME, "org.freedesktop.portal.Request", "Response",
+                                        path, None, Gio.DBusSignalFlags.NONE, on_response)
+        options = dict(options, handle_token=GLib.Variant("s", token))
+        signature = "(" + "".join(sig for sig, _ in args) + "a{sv})"
+        try:
+            self.bus.call_sync(PORTAL_NAME, PORTAL_PATH, f"org.freedesktop.portal.{iface}", method,
+                               GLib.Variant(signature, (*(v for _, v in args), options)),
+                               None, Gio.DBusCallFlags.NONE, -1, None)
+            loop.run()
+        finally:
+            self.bus.signal_unsubscribe(sub)
+        code, results = response
+        if code != 0:
+            raise PortalCancelled()
+        return results
+
+
+def portal_screenshot(interactive=False):
+    """Full-desktop screenshot (or, interactively, whatever the user picks in GNOME's UI)."""
+    results = Portal().request("Screenshot", "Screenshot", [("s", "")],
+                               {"interactive": GLib.Variant("b", interactive)})
+    path = GLib.filename_from_uri(results["uri"])[0]
+    try:
+        return GdkPixbuf.Pixbuf.new_from_file(path)
+    finally:
+        # The portal drops its file into ~/Pictures; we only want the pixels.
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def load_tokens():
+    try:
+        with open(TOKEN_FILE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_tokens(tokens):
+    os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
+    with open(TOKEN_FILE, "w") as f:
+        json.dump(tokens, f)
+
+
+def monitor_key(rect):
+    """Key ("x,y" of the monitor holding the rect's centre) for the saved screencast tokens."""
+    display = Gdk.Display.get_default()
+    s = scale_factor()
+    x, y, w, h = rect
+    g = display.get_monitor_at_point(int((x + w / 2) / s), int((y + h / 2) / s)).get_geometry()
+    return f"{g.x},{g.y}"
+
+
+class ScreenCast:
+    """Portal screencast session handing out a PipeWire fd + node for pipewiresrc.
+
+    Monitor sessions are persisted per monitor, so GNOME only asks which monitor to
+    share the first time; window sessions always ask which window to record.
+    """
+
+    def __init__(self):
+        self.portal = Portal()
+        self.session = None
+        self.fd = None
+        self.node = None
+        self.props = {}
+
+    def start(self, window, pointer, key=None):
+        """Returns True when streaming; raises PortalCancelled / GLib.Error otherwise."""
+        p = self.portal
+        try:
+            res = p.request("ScreenCast", "CreateSession", [],
+                            {"session_handle_token": GLib.Variant("s", p.token())})
+            self.session = res["session_handle"]
+            tokens = load_tokens()
+            options = {"types": GLib.Variant("u", 2 if window else 1),
+                       "multiple": GLib.Variant("b", False),
+                       "cursor_mode": GLib.Variant("u", 2 if pointer else 1),
+                       "persist_mode": GLib.Variant("u", 2)}
+            if not window and tokens.get(key):
+                options["restore_token"] = GLib.Variant("s", tokens[key])
+            p.request("ScreenCast", "SelectSources", [("o", self.session)], options)
+            res = p.request("ScreenCast", "Start", [("o", self.session), ("s", "")], {})
+            self.node, self.props = res["streams"][0]
+            if not window and res.get("restore_token"):
+                pos = self.props.get("position", (0, 0))
+                tokens[f"{pos[0]},{pos[1]}"] = res["restore_token"]
+                save_tokens(tokens)
+            ret, fds = p.bus.call_with_unix_fd_list_sync(
+                PORTAL_NAME, PORTAL_PATH, "org.freedesktop.portal.ScreenCast", "OpenPipeWireRemote",
+                GLib.Variant("(oa{sv})", (self.session, {})), GLib.VariantType("(h)"),
+                Gio.DBusCallFlags.NONE, -1, None, None)
+            self.fd = fds.get(ret.unpack()[0])
+            return True
+        except Exception:
+            self.close()
+            raise
+
+    def close(self):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+        if self.session is not None:
+            try:
+                self.portal.bus.call_sync(PORTAL_NAME, self.session, "org.freedesktop.portal.Session",
+                                          "Close", None, None, Gio.DBusCallFlags.NONE, 2000, None)
+            except GLib.Error:
+                pass
+            self.session = None
+
+
+def gst_record_command(fd, node, crop, fps, audio_device, path):
+    """gst-launch pipeline: PipeWire stream (cropped) -> H.264 (+ AAC) -> MP4."""
+    cmd = ["gst-launch-1.0", "-q", "-e",
+           "pipewiresrc", f"fd={fd}", f"path={node}", "do-timestamp=true", "keepalive-time=1000", "!",
+           "videoconvert", "!", "videorate", "!", f"video/x-raw,framerate={fps}/1", "!"]
+    if crop:
+        left, top, right, bottom = crop
+        cmd += ["videocrop", f"left={left}", f"top={top}", f"right={right}", f"bottom={bottom}", "!"]
+    cmd += ["videoconvert", "!", "video/x-raw,format=I420", "!",
+            "x264enc", "speed-preset=veryfast", "pass=quant", "quantizer=23", "!", "h264parse", "!",
+            "queue", "!", "mp4mux", "name=mux", "faststart=true", "!", "filesink", f"location={path}"]
+    if audio_device:
+        cmd += ["pulsesrc", f"device={audio_device}", "!", "audioconvert", "!", "audioresample", "!",
+                "avenc_aac", "bitrate=160000", "!", "queue", "!", "mux."]
+    return cmd
 
 
 def gif_command(src, dst, fps=15, max_width=1280):
@@ -204,21 +348,18 @@ def clamp_rect(rect, width, height):
 # ---------------------------------------------------------------------------
 
 class SelectionOverlay(Gtk.Window):
-    """Fullscreen overlay over a frozen screenshot to pick an area or a window.
+    """Fullscreen overlay over a frozen screenshot to pick an area.
 
     Calls on_done(rect) with a physical-pixel rect, or on_done(None) when cancelled.
     """
 
-    def __init__(self, background, mode, on_done):
+    def __init__(self, background, on_done):
         super().__init__(type=Gtk.WindowType.POPUP)
         self.bg = background
-        self.mode = mode
         self.on_done = on_done
         self.scale = scale_factor()
-        self.windows = visible_windows() if mode == "window" else []
         self.start = None
         self.current = None
-        self.hover = None
         self.finished = False
 
         w, h = root_size()
@@ -240,19 +381,13 @@ class SelectionOverlay(Gtk.Window):
     def present_and_grab(self):
         self.show_all()
         gdk_win = self.get_window()
-        cursor = Gdk.Cursor.new_for_display(
-            Gdk.Display.get_default(),
-            Gdk.CursorType.CROSSHAIR if self.mode == "area" else Gdk.CursorType.HAND2)
+        cursor = Gdk.Cursor.new_for_display(Gdk.Display.get_default(), Gdk.CursorType.CROSSHAIR)
         seat = Gdk.Display.get_default().get_default_seat()
         # Retry briefly: the grab can fail until the popup is actually mapped.
         def try_grab(attempt=[0]):
             status = seat.grab(gdk_win, Gdk.SeatCapabilities.ALL, True, cursor, None, None)
             attempt[0] += 1
-            if status != Gdk.GrabStatus.SUCCESS and attempt[0] < 20:
-                return True
-            if self.mode == "window":
-                self.update_hover(*self.pointer_pos())
-            return False
+            return status != Gdk.GrabStatus.SUCCESS and attempt[0] < 20
         GLib.timeout_add(25, try_grab)
 
     def pointer_pos(self):
@@ -262,27 +397,10 @@ class SelectionOverlay(Gtk.Window):
     # -- geometry ----------------------------------------------------------
 
     def selection_logical(self):
-        if self.mode == "window":
-            if self.hover is None:
-                return None
-            x, y, w, h = self.hover[1]
-            s = self.scale
-            return x / s, y / s, w / s, h / s
         if self.start is None or self.current is None:
             return None
         (x1, y1), (x2, y2) = self.start, self.current
         return min(x1, x2), min(y1, y2), abs(x2 - x1), abs(y2 - y1)
-
-    def update_hover(self, x, y):
-        px, py = x * self.scale, y * self.scale
-        hover = None
-        for title, (wx, wy, ww, wh) in self.windows:
-            if wx <= px < wx + ww and wy <= py < wy + wh:
-                hover = (title, (wx, wy, ww, wh))
-                break
-        if hover != self.hover:
-            self.hover = hover
-            self.area.queue_draw()
 
     # -- drawing -----------------------------------------------------------
 
@@ -310,12 +428,9 @@ class SelectionOverlay(Gtk.Window):
             cr.rectangle(x + 1, y + 1, max(w - 2, 0), max(h - 2, 0))
             cr.stroke()
             label = f"{int(w * self.scale)} × {int(h * self.scale)}"
-            if self.mode == "window" and self.hover:
-                label = f"{self.hover[0]}  ·  {label}"
             self.draw_label(cr, label, x, y + h + 8, height)
         else:
-            hint = ("드래그해서 영역을 선택하세요 · Esc 취소" if self.mode == "area"
-                    else "캡처할 창을 클릭하세요 · Esc 취소")
+            hint = "드래그해서 영역을 선택하세요 · Esc 취소"
             x, y = self.pointer_pos()
             self.draw_label(cr, hint, x + 16, y + 16, height)
 
@@ -338,27 +453,18 @@ class SelectionOverlay(Gtk.Window):
     def on_press(self, widget, event):
         if event.button == 3:
             self.finish(None)
-        elif event.button == 1 and self.mode == "area":
+        elif event.button == 1:
             self.start = self.current = (event.x, event.y)
         return True
 
     def on_motion(self, widget, event):
-        if self.mode == "window":
-            self.update_hover(event.x, event.y)
-        elif self.start is not None:
+        if self.start is not None:
             self.current = (event.x, event.y)
         widget.queue_draw()
         return True
 
     def on_release(self, widget, event):
-        if event.button != 1:
-            return True
-        if self.mode == "window":
-            self.update_hover(event.x, event.y)
-            if self.hover:
-                self.finish(self.hover[1])
-            return True
-        if self.start is None:
+        if event.button != 1 or self.start is None:
             return True
         self.current = (event.x, event.y)
         x, y, w, h = self.selection_logical()
@@ -373,8 +479,6 @@ class SelectionOverlay(Gtk.Window):
     def on_key(self, widget, event):
         if event.keyval == Gdk.KEY_Escape:
             self.finish(None)
-        elif event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and self.mode == "window" and self.hover:
-            self.finish(self.hover[1])
         return True
 
     def finish(self, rect):
@@ -750,47 +854,6 @@ def countdown(seconds, done, rect=None):
     GLib.timeout_add(1000, tick)
 
 
-class EscapeGrab:
-    """Grab Escape on the X root window so it stops a recording from any app."""
-
-    def __init__(self, callback):
-        self.callback = callback
-        self.display = None
-        self.watch = None
-        try:
-            from Xlib import X, XK, display as xdisplay
-        except ImportError:
-            return
-        self.X = X
-        self.display = xdisplay.Display()
-        self.root = self.display.screen().root
-        self.keycode = self.display.keysym_to_keycode(XK.XK_Escape)
-        # Grab with every combination of CapsLock / NumLock so they don't defeat it.
-        self.mods = (0, X.LockMask, X.Mod2Mask, X.LockMask | X.Mod2Mask)
-        for mod in self.mods:
-            self.root.grab_key(self.keycode, mod, True, X.GrabModeAsync, X.GrabModeAsync,
-                               onerror=lambda *_: None)
-        self.display.flush()
-        self.watch = GLib.io_add_watch(self.display.fileno(), GLib.IO_IN, self.on_event)
-
-    def on_event(self, *_):
-        while self.display.pending_events():
-            event = self.display.next_event()
-            if event.type == self.X.KeyPress and event.detail == self.keycode:
-                self.callback()
-        return True
-
-    def release(self):
-        if self.display is None:
-            return
-        if self.watch is not None:
-            GLib.source_remove(self.watch)
-        for mod in self.mods:
-            self.root.ungrab_key(self.keycode, mod)
-        self.display.close()
-        self.display = None
-
-
 class RecordingFrame(Gtk.Window):
     """Click-through overlay that dims everything outside the area being recorded."""
 
@@ -1106,23 +1169,29 @@ class App:
 
     # -- target selection --------------------------------------------------
 
-    def grab_screen(self, pointer):
-        """Whole-screen pixbuf, or None (after notifying and quitting) on failure."""
-        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-        tmp.close()
+    def grab_screen(self, interactive=False):
+        """Whole-desktop pixbuf, or None (after notifying / reopening) on failure."""
         try:
-            grab_root(tmp.name, pointer)
-            return GdkPixbuf.Pixbuf.new_from_file(tmp.name)
-        except (subprocess.CalledProcessError, GLib.Error) as exc:
-            notify(APP_NAME, f"화면을 캡처하지 못했습니다: {exc}", "dialog-error")
+            return portal_screenshot(interactive)
+        except PortalCancelled:
+            pass
+        except GLib.Error as exc:
+            notify(APP_NAME, f"화면을 캡처하지 못했습니다: {exc.message}", "dialog-error")
+        if self.dialog_settings:
+            self.show_dialog()
+        else:
             self.quit(1)
-            return None
-        finally:
-            os.unlink(tmp.name)
+        return None
 
-    def choose_target(self, target, pointer, callback):
+    def choose_target(self, target, callback):
         """Freeze the screen, let the user choose, then callback(rect, frozen_pixbuf)."""
-        frozen = self.grab_screen(pointer)
+        if target == "window":
+            # Windows can't be listed on Wayland; GNOME's own picker hands back the window.
+            shot = self.grab_screen(interactive=True)
+            if shot is not None:
+                callback((0, 0, shot.get_width(), shot.get_height()), shot)
+            return
+        frozen = self.grab_screen()
         if frozen is None:
             return
 
@@ -1131,25 +1200,33 @@ class App:
         elif target == "screen":
             callback(clamp_rect(pointer_monitor_rect(), frozen.get_width(), frozen.get_height()), frozen)
         else:
-            overlay = SelectionOverlay(frozen, target, lambda rect: callback(rect, frozen))
+            overlay = SelectionOverlay(frozen, lambda rect: callback(rect, frozen))
             overlay.present_and_grab()
 
     # -- screenshot --------------------------------------------------------
 
-    def screenshot(self, target, pointer=True, delay=0, output=None, clipboard=True, preview=True):
+    def screenshot(self, target, delay=0, output=None, clipboard=True, preview=True):
         def chosen(rect, frozen):
-            if rect is None or delay <= 0:
+            if rect is None or delay <= 0 or target == "window":
                 self.save_shot(rect, frozen, output, clipboard, preview)
                 return
 
             # Area picked on the frozen frame; count down over it, then grab it fresh.
             def shoot():
-                fresh = self.grab_screen(pointer)
+                fresh = self.grab_screen()
                 if fresh is not None:
                     self.save_shot(rect, fresh, output, clipboard, preview)
                 return False
             countdown(delay, shoot, rect)
-        GLib.timeout_add(1, lambda: (self.choose_target(target, pointer, chosen), False)[1])
+
+        def go():
+            self.choose_target(target, chosen)
+            return False
+        # GNOME's window picker has no delay of its own, so count down before opening it.
+        if target == "window" and delay > 0:
+            countdown(delay, go)
+        else:
+            GLib.timeout_add(1, go)
 
     def save_shot(self, rect, frozen, output, clipboard, preview):
         if rect is None:
@@ -1226,24 +1303,61 @@ class App:
             return
 
         def chosen(rect, _frozen):
-            start = lambda: (self.start_recording(rect, pointer, audio, output, fps,  # noqa: E731
-                                                  preview, target != "all"), False)[1]
+            start = lambda: (self.start_recording(target, rect, pointer, audio, output, fps,  # noqa: E731
+                                                  preview), False)[1]
             # Pick the area first, then count down over it before recording starts.
             if rect is None or delay <= 0:
                 start()
             else:
-                countdown(delay, start, rect)
-        GLib.timeout_add(1, lambda: (self.choose_target(target, False, chosen), False)[1])
+                countdown(delay, start, None if target == "window" else rect)
 
-    def start_recording(self, rect, pointer, audio, output, fps, preview, frame):
+        def go():
+            if target == "window":
+                chosen((0, 0, 0, 0), None)  # the portal asks which window
+            elif target == "screen":
+                chosen(pointer_monitor_rect(), None)
+            else:
+                self.choose_target(target, chosen)
+            return False
+        GLib.timeout_add(1, go)
+
+    def start_recording(self, target, rect, pointer, audio, output, fps, preview):
         if rect is None:
             if self.dialog_settings:
                 self.show_dialog()
             else:
                 self.quit(1)
             return
-        x, y, w, h = rect
-        w, h = w - w % 2, h - h % 2  # yuv420p needs even dimensions
+        window = target == "window"
+        self.screencast = ScreenCast()
+        try:
+            self.screencast.start(window, pointer, None if window else monitor_key(rect))
+        except (PortalCancelled, GLib.Error, KeyError, IndexError) as exc:
+            if not isinstance(exc, PortalCancelled):
+                notify(APP_NAME, f"화면 녹화를 시작하지 못했습니다: {exc}", "dialog-error")
+            self.start_recording(target, None, pointer, audio, output, fps, preview)
+            return
+
+        # Crop the monitor stream down to the chosen area (stream coords are relative to it).
+        sw, sh = self.screencast.props.get("size", (0, 0))
+        crop = None
+        frame = None
+        if window or target == "all" or not sw:
+            w, h = sw, sh
+        else:
+            px, py = self.screencast.props.get("position", (0, 0))
+            s = scale_factor()
+            x, y, w, h = rect
+            x, y = x // s - px, y // s - py
+            left, top = max(x, 0), max(y, 0)
+            w = min(x + w // s, sw) - left
+            h = min(y + h // s, sh) - top
+            w, h = w - w % 2, h - h % 2  # I420 needs even dimensions
+            if w <= 0 or h <= 0:
+                left, top, w, h = 0, 0, sw - sw % 2, sh - sh % 2
+            crop = (left, top, sw - left - w, sh - top - h)
+            frame = ((left + px) * s, (top + py) * s, w * s, h * s)
+
         self.rec_target = output or default_output(video=True)
         self.rec_preview = preview and VideoPreviewWindow.available()
         if self.rec_preview:
@@ -1257,35 +1371,27 @@ class App:
             os.close(fd)
         else:
             path = self.rec_target
-        cmd = ["ffmpeg", "-loglevel", "error", "-y",
-               "-thread_queue_size", "512", "-f", "x11grab",
-               "-draw_mouse", "1" if pointer else "0", "-framerate", str(fps),
-               "-video_size", f"{w}x{h}", "-i", f"{display_name()}+{x},{y}"]
+        audio_device = None
         if audio:
             sink = subprocess.run(["pactl", "get-default-sink"], capture_output=True, text=True).stdout.strip()
-            if sink:
-                cmd += ["-thread_queue_size", "512", "-f", "pulse", "-i", f"{sink}.monitor"]
-        cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p"]
-        if audio:
-            cmd += ["-c:a", "aac", "-b:a", "160k"]
-        cmd += ["-movflags", "+faststart", path]
+            audio_device = f"{sink}.monitor" if sink else None
+        cmd = gst_record_command(self.screencast.fd, self.screencast.node, crop, fps, audio_device, path)
 
         self.rec_path = path
-        self.rec_size = (w, h)
-        self.rec_frame = RecordingFrame((x, y, w, h)) if frame else None
+        self.rec_size = (w or 1280, h or 720)
+        self.rec_frame = RecordingFrame(frame) if frame else None
         if self.rec_frame is not None:
             self.rec_frame.show_all()
         self.rec_started = GLib.get_monotonic_time()
-        self.ffmpeg = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+        self.recorder = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, pass_fds=(self.screencast.fd,))
         self.keep_alive = True
         write_pid()
-        GLib.child_watch_add(GLib.PRIORITY_DEFAULT, self.ffmpeg.pid, self.on_ffmpeg_exit)
+        GLib.child_watch_add(GLib.PRIORITY_DEFAULT, self.recorder.pid, self.on_recorder_exit)
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGUSR1):
             GLib.unix_signal_add(GLib.PRIORITY_HIGH, sig, self.stop_recording)
         self.setup_indicator()
-        self.esc_grab = EscapeGrab(self.stop_recording)
-        notify("화면 녹화를 시작했습니다", "Esc 키를 누르거나 상단 표시줄의 녹화 표시를 클릭하면 중지됩니다.",
-               "media-record")
+        notify("화면 녹화를 시작했습니다",
+               "상단 표시줄의 녹화 표시를 클릭하거나 Ctrl+Shift+Alt+R을 누르면 중지됩니다.", "media-record")
 
     def setup_indicator(self):
         self.indicator = RecordingIndicator(self.stop_recording)
@@ -1293,14 +1399,14 @@ class App:
         self.tick()
 
     def tick(self):
-        if self.ffmpeg.poll() is not None:
+        if self.recorder.poll() is not None:
             return False
         secs = (GLib.get_monotonic_time() - self.rec_started) // 1_000_000
         self.indicator.set_elapsed(f"{secs // 60:02d}:{secs % 60:02d}")
         return True
 
     def stop_recording(self, *_):
-        if self.ffmpeg.poll() is not None:
+        if self.recorder.poll() is not None:
             # Recording is over (only signals get here now): close windows, which also
             # discards an unsaved recording, and exit.
             for win in Gtk.Window.list_toplevels():
@@ -1308,17 +1414,13 @@ class App:
                     win.destroy()
             self.quit(0)
             return True
-        if self.ffmpeg.poll() is None:
-            try:
-                self.ffmpeg.stdin.write(b"q")
-                self.ffmpeg.stdin.flush()
-            except (BrokenPipeError, OSError):
-                self.ffmpeg.terminate()
+        # gst-launch -e turns SIGINT into EOS, which finalises the MP4.
+        self.recorder.send_signal(signal.SIGINT)
         return True
 
-    def on_ffmpeg_exit(self, _pid, status):
+    def on_recorder_exit(self, _pid, status):
         clear_pid()
-        self.esc_grab.release()
+        self.screencast.close()
         self.indicator.close()
         if self.rec_frame is not None:
             self.rec_frame.destroy()
@@ -1446,11 +1548,8 @@ class CaptureDialog(Gtk.Window):
         self.connect("key-press-event", self.on_key)
         # Losing focus (e.g. a click outside the panel) dismisses it. Take focus
         # explicitly on map, since a shortcut launch may not hand it to us.
-        # GTK doesn't always report the focus loss, so watch the active window instead.
         self.connect("map-event", self.take_focus)
-        self.wnck = Wnck.Screen.get_default()
-        self.wnck_handler = self.wnck.connect("active-window-changed", self.on_active_changed)
-        self.connect("destroy", lambda *_: self.wnck.disconnect(self.wnck_handler))
+        self.connect("notify::is-active", self.on_active_changed)
 
         # Transparent window so the panel's rounded corners show.
         visual = self.get_screen().get_rgba_visual()
@@ -1511,6 +1610,9 @@ class CaptureDialog(Gtk.Window):
         options = Gtk.Box(spacing=8)
         self.pointer_chk = self.icon_button("input-mouse-symbolic", "마우스 포인터 표시", "chip", toggle=True)
         self.pointer_chk.set_active(pointer)
+        # The portal screenshot never includes the pointer, so this only affects recordings.
+        self.pointer_chk.set_no_show_all(True)
+        self.pointer_chk.get_child().show()
         options.pack_start(self.pointer_chk, False, False, 0)
         self.audio_chk = self.icon_button("audio-volume-high-symbolic", "시스템 소리 녹음", "chip", toggle=True)
         self.audio_chk.set_active(audio)
@@ -1602,11 +1704,8 @@ class CaptureDialog(Gtk.Window):
         window.focus(GdkX11.x11_get_server_time(window))
         return False
 
-    def on_active_changed(self, screen, _previous):
-        active = screen.get_active_window()
-        if not self.get_realized() or active is None:
-            return
-        if active.get_xid() == self.get_window().get_xid():
+    def on_active_changed(self, *_):
+        if self.is_active():
             self.had_focus = True
         elif getattr(self, "had_focus", False):
             self.close_dialog()
@@ -1618,6 +1717,7 @@ class CaptureDialog(Gtk.Window):
     def sync(self):
         video = self.video_btn.get_active()
         self.audio_chk.set_visible(video)
+        self.pointer_chk.set_visible(video)
         self.title_label.set_text("화면 녹화" if video else "스크린샷")
         self.capture_btn.set_tooltip_text("녹화 시작" if video else "캡처")
         ctx = self.capture_btn.get_style_context()
@@ -1657,7 +1757,7 @@ class CaptureDialog(Gtk.Window):
             if video:
                 self.app.record(target, pointer=pointer, audio=audio, delay=delay)
             else:
-                self.app.screenshot(target, pointer=pointer, delay=delay)
+                self.app.screenshot(target, delay=delay)
             return False
         GLib.timeout_add(250, go)
 
@@ -1667,7 +1767,7 @@ class CaptureDialog(Gtk.Window):
 # ---------------------------------------------------------------------------
 
 def parse_args(argv):
-    p = argparse.ArgumentParser(prog="snapshot", description="Screenshot and screencast tool (X11)")
+    p = argparse.ArgumentParser(prog="snapshot", description="Screenshot and screencast tool (GNOME Wayland)")
     sub = p.add_subparsers(dest="cmd")
 
     ui = sub.add_parser("ui", help="open the capture dialog (default)")
@@ -1675,7 +1775,7 @@ def parse_args(argv):
 
     shot = sub.add_parser("shot", help="take a screenshot")
     shot.add_argument("target", choices=TARGETS)
-    shot.add_argument("-p", "--pointer", action="store_true", help="include mouse pointer")
+    shot.add_argument("-p", "--pointer", action="store_true", help=argparse.SUPPRESS)  # unsupported on Wayland
     shot.add_argument("-d", "--delay", type=float, default=0)
     shot.add_argument("-o", "--output")
     shot.add_argument("--no-clipboard", action="store_true")
@@ -1700,23 +1800,24 @@ def parse_args(argv):
     return p.parse_args(argv)
 
 
-def detach():
-    """Fork before GTK/DBus start threads so the shell gets control back once the
-    file is saved, while the child keeps the preview and clipboard alive."""
+def detach(argv):
+    """Run the capture in a new process so the shell gets control back once the file
+    is saved, while the child keeps the preview and clipboard alive. (A plain fork
+    won't do: GTK has already started GDBus threads, which a forked child lacks.)"""
     r, w = os.pipe()
-    if os.fork() != 0:
-        os.close(w)
-        data = b""
-        while chunk := os.read(r, 4096):
-            data += chunk
-        os._exit(0 if data else 1)
-    os.close(r)
-    os.setsid()
-    return w
+    env = dict(os.environ, SNAPSHOT_REPORT_FD=str(w))
+    subprocess.Popen([sys.executable, os.path.abspath(__file__), *argv], pass_fds=(w,), env=env,
+                     start_new_session=True, stdin=subprocess.DEVNULL)
+    os.close(w)
+    data = b""
+    while chunk := os.read(r, 4096):
+        data += chunk
+    return 0 if data else 1
 
 
 def main(argv=None):
-    args = parse_args(sys.argv[1:] if argv is None else argv)
+    argv = sys.argv[1:] if argv is None else argv
+    args = parse_args(argv)
     cmd = args.cmd or "ui"
 
     if cmd == "notify-saved":
@@ -1734,14 +1835,18 @@ def main(argv=None):
 
     if not check_session():
         return 1
-    report_fd = detach() if cmd == "shot" else None
+    report_fd = None
+    if cmd == "shot":
+        if "SNAPSHOT_REPORT_FD" not in os.environ:
+            return detach(argv)
+        report_fd = int(os.environ.pop("SNAPSHOT_REPORT_FD"))
     Notify.init(APP_NAME)
     app = App(report_fd)
 
     if cmd == "ui":
         app.show_dialog(video=getattr(args, "video", False))
     elif cmd == "shot":
-        app.screenshot(args.target, pointer=args.pointer, delay=args.delay,
+        app.screenshot(args.target, delay=args.delay,
                        output=args.output, clipboard=not args.no_clipboard,
                        preview=not args.no_preview)
     elif cmd == "record":
