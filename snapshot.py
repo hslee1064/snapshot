@@ -2,8 +2,8 @@
 """Snapshot - a GNOME-style screenshot / screencast tool for Ubuntu (GNOME on Wayland).
 
 Targets: selection (area), window, screen (monitor under pointer), all (every monitor).
-Screenshots come from the xdg-desktop-portal Screenshot API, frozen on an overlay
-for selection, saved as PNG and copied to the clipboard.
+Screenshots come from the xdg-desktop-portal Screenshot API after an area is
+picked on a see-through overlay, saved as PNG and copied to the clipboard.
 Screencasts are recorded from the portal ScreenCast PipeWire stream with GStreamer
 (+ optional PulseAudio monitor) to MP4. The UI itself runs through XWayland so the
 overlays can be placed on screen.
@@ -348,14 +348,15 @@ def clamp_rect(rect, width, height):
 # ---------------------------------------------------------------------------
 
 class SelectionOverlay(Gtk.Window):
-    """Fullscreen overlay over a frozen screenshot to pick an area.
+    """Translucent fullscreen overlay over the live screen to pick an area.
+
+    The screen is only grabbed after the pick: every portal grab flashes the screen.
 
     Calls on_done(rect) with a physical-pixel rect, or on_done(None) when cancelled.
     """
 
-    def __init__(self, background, on_done):
+    def __init__(self, on_done):
         super().__init__(type=Gtk.WindowType.POPUP)
-        self.bg = background
         self.on_done = on_done
         self.scale = scale_factor()
         self.start = None
@@ -365,6 +366,9 @@ class SelectionOverlay(Gtk.Window):
         w, h = root_size()
         self.move(0, 0)
         self.set_default_size(w // self.scale, h // self.scale)
+        visual = self.get_screen().get_rgba_visual()
+        if visual is not None:
+            self.set_visual(visual)
         self.set_app_paintable(True)
 
         area = Gtk.DrawingArea()
@@ -405,11 +409,10 @@ class SelectionOverlay(Gtk.Window):
     # -- drawing -----------------------------------------------------------
 
     def on_draw(self, widget, cr):
-        cr.save()
-        cr.scale(1 / self.scale, 1 / self.scale)
-        Gdk.cairo_set_source_pixbuf(cr, self.bg, 0, 0)
+        cr.set_operator(cairo.OPERATOR_SOURCE)
+        cr.set_source_rgba(0, 0, 0, 0)
         cr.paint()
-        cr.restore()
+        cr.set_operator(cairo.OPERATOR_OVER)
 
         width, height = widget.get_allocated_width(), widget.get_allocated_height()
         sel = self.selection_logical()
@@ -1183,50 +1186,40 @@ class App:
             self.quit(1)
         return None
 
-    def choose_target(self, target, callback):
-        """Freeze the screen, let the user choose, then callback(rect, frozen_pixbuf)."""
-        if target == "window":
-            # Windows can't be listed on Wayland; GNOME's own picker hands back the window.
-            shot = self.grab_screen(interactive=True)
-            if shot is not None:
-                callback((0, 0, shot.get_width(), shot.get_height()), shot)
-            return
-        frozen = self.grab_screen()
-        if frozen is None:
-            return
-
-        if target == "all":
-            callback((0, 0, frozen.get_width(), frozen.get_height()), frozen)
-        elif target == "screen":
-            callback(clamp_rect(pointer_monitor_rect(), frozen.get_width(), frozen.get_height()), frozen)
-        else:
-            overlay = SelectionOverlay(frozen, lambda rect: callback(rect, frozen))
-            overlay.present_and_grab()
+    def select_area(self, callback):
+        """Let the user drag out an area on the live screen, then callback(rect or None)."""
+        SelectionOverlay(callback).present_and_grab()
 
     # -- screenshot --------------------------------------------------------
 
     def screenshot(self, target, delay=0, output=None, clipboard=True, preview=True):
-        def chosen(rect, frozen):
-            if rect is None or delay <= 0 or target == "window":
-                self.save_shot(rect, frozen, output, clipboard, preview)
-                return
-
-            # Area picked on the frozen frame; count down over it, then grab it fresh.
-            def shoot():
-                fresh = self.grab_screen()
-                if fresh is not None:
-                    self.save_shot(rect, fresh, output, clipboard, preview)
+        def capture(rect=None):
+            if target == "window":
+                # Windows can't be listed on Wayland; GNOME's own picker hands back the window.
+                shot = self.grab_screen(interactive=True)
+                rect = shot and (0, 0, shot.get_width(), shot.get_height())
+            else:
+                shot = self.grab_screen()
+            if shot is None:
                 return False
-            countdown(delay, shoot, rect)
-
-        def go():
-            self.choose_target(target, chosen)
+            if target == "all":
+                rect = (0, 0, shot.get_width(), shot.get_height())
+            elif target == "screen":
+                rect = pointer_monitor_rect()
+            self.save_shot(clamp_rect(rect, shot.get_width(), shot.get_height()), shot,
+                           output, clipboard, preview)
             return False
-        # GNOME's window picker has no delay of its own, so count down before opening it.
-        if target == "window" and delay > 0:
-            countdown(delay, go)
+
+        def chosen(rect):
+            if rect is None:
+                self.save_shot(None, None, output, clipboard, preview)
+            else:
+                countdown(delay, lambda: capture(rect), rect)
+
+        if target == "area":
+            GLib.timeout_add(1, lambda: (self.select_area(chosen), False)[1])
         else:
-            GLib.timeout_add(1, go)
+            countdown(delay, capture)
 
     def save_shot(self, rect, frozen, output, clipboard, preview):
         if rect is None:
@@ -1302,7 +1295,7 @@ class App:
             self.quit(1)
             return
 
-        def chosen(rect, _frozen):
+        def chosen(rect):
             start = lambda: (self.start_recording(target, rect, pointer, audio, output, fps,  # noqa: E731
                                                   preview), False)[1]
             # Pick the area first, then count down over it before recording starts.
@@ -1313,11 +1306,13 @@ class App:
 
         def go():
             if target == "window":
-                chosen((0, 0, 0, 0), None)  # the portal asks which window
+                chosen((0, 0, 0, 0))  # the portal asks which window
             elif target == "screen":
-                chosen(pointer_monitor_rect(), None)
+                chosen(pointer_monitor_rect())
+            elif target == "all":
+                chosen((0, 0, *root_size()))
             else:
-                self.choose_target(target, chosen)
+                self.select_area(chosen)
             return False
         GLib.timeout_add(1, go)
 
