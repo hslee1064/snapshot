@@ -3,7 +3,7 @@
 
 Targets: selection (area), window, screen (monitor under pointer), all (every monitor).
 Screenshots come from the xdg-desktop-portal Screenshot API after an area is
-picked on a see-through overlay, saved as PNG and copied to the clipboard.
+picked on a see-through overlay, saved as PNG and copied to the clipboard (Ctrl+C in the preview).
 Screencasts are recorded from the portal ScreenCast PipeWire stream with GStreamer
 (+ optional PulseAudio monitor) to MP4. The UI itself runs through XWayland so the
 overlays can be placed on screen.
@@ -518,11 +518,12 @@ class PreviewWindow(Gtk.Window):
 
     MAX_W, MAX_H = 960, 640
 
-    def __init__(self, pixbuf, path, copied, on_close):
+    def __init__(self, pixbuf, path, on_copy, on_close):
         super().__init__(title="스크린샷")
         self.pixbuf = pixbuf
         self.path = path
         self.saved = None
+        self.on_copy = on_copy
         self.on_close = on_close
         self.set_position(Gtk.WindowPosition.CENTER)
         self.set_keep_above(True)
@@ -532,7 +533,8 @@ class PreviewWindow(Gtk.Window):
 
         w, h = pixbuf.get_width(), pixbuf.get_height()
         self.header = Gtk.HeaderBar(title="스크린샷 미리보기", show_close_button=True)
-        self.header.set_subtitle(f"{w} × {h}" + ("  ·  클립보드에 복사됨" if copied else ""))
+        self.size_text = f"{w} × {h}"
+        self.header.set_subtitle(f"{self.size_text}  ·  Ctrl+C로 클립보드에 복사")
         self.set_titlebar(self.header)
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
@@ -572,6 +574,9 @@ class PreviewWindow(Gtk.Window):
             self.destroy()
         elif key in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) or (ctrl and key == Gdk.KEY_s):
             self.save_as()
+        elif ctrl and key == Gdk.KEY_c:
+            self.on_copy(self.pixbuf)
+            self.header.set_subtitle(f"{self.size_text}  ·  클립보드에 복사됨")
         else:
             return False
         return True
@@ -1256,12 +1261,12 @@ class App:
             return
 
         # Stay alive while the preview is open and/or we own the clipboard.
-        if clipboard:
-            self.pending.add("clipboard")
-            self.hold_clipboard(pixbuf)
+        # With a preview, copying waits for Ctrl+C there; without one it happens right away.
         if preview:
             self.pending.add("preview")
-            PreviewWindow(pixbuf, path, clipboard, lambda: self.preview_closed()).show_all()
+            PreviewWindow(pixbuf, path, self.hold_clipboard, lambda: self.preview_closed()).show_all()
+        elif clipboard:
+            self.hold_clipboard(pixbuf)
 
     def preview_closed(self):
         if self.dialog_settings:
@@ -1287,6 +1292,7 @@ class App:
 
     def hold_clipboard(self, pixbuf):
         """Own the clipboard until another app replaces it (like xclip does)."""
+        self.pending.add("clipboard")
         cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
         cb.set_image(pixbuf)
         cb.store()
