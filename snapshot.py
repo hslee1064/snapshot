@@ -325,6 +325,48 @@ class ScreenCast:
             self.session = None
 
 
+def screencast_frame(key, position):
+    """One frame of a monitor via a ScreenCast session; unlike the Screenshot portal it
+    doesn't flash. Returns None if the session isn't for the monitor at `position`."""
+    cast = ScreenCast()
+    cast.start(False, False, key)
+    fd, tmp = tempfile.mkstemp(prefix="snapshot-", suffix=".png")
+    os.close(fd)
+    try:
+        if tuple(cast.props.get("position", (0, 0))) != position:
+            return None
+        subprocess.run(["gst-launch-1.0", "-q", "pipewiresrc", f"fd={cast.fd}", f"path={cast.node}", "!",
+                        "videoconvert", "!", "pngenc", "snapshot=true", "!", "filesink", f"location={tmp}"],
+                       pass_fds=(cast.fd,), stdin=subprocess.DEVNULL, timeout=5, check=True)
+        return without_alpha(GdkPixbuf.Pixbuf.new_from_file(tmp))
+    finally:
+        cast.close()
+        os.unlink(tmp)
+
+
+def silent_grab(rect):
+    """Root-sized pixbuf with every monitor touching `rect` filled in, or None."""
+    display = Gdk.Display.get_default()
+    s = scale_factor()
+    width, height = root_size()
+    x, y, w, h = rect
+    dest = None
+    for i in range(display.get_n_monitors()):
+        g = display.get_monitor(i).get_geometry()
+        mx, my, mw, mh = g.x * s, g.y * s, g.width * s, g.height * s
+        if x >= mx + mw or y >= my + mh or x + w <= mx or y + h <= my:
+            continue
+        frame = screencast_frame(f"{g.x},{g.y}", (g.x, g.y))
+        if frame is None:
+            return None
+        if dest is None:
+            dest = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, False, 8, width, height)
+            dest.fill(0x000000ff)
+        frame.copy_area(0, 0, min(frame.get_width(), width - mx), min(frame.get_height(), height - my),
+                        dest, mx, my)
+    return dest
+
+
 def gst_record_command(fd, node, crop, fps, audio_device, path):
     """gst-launch pipeline: PipeWire stream (cropped) -> H.264 (+ AAC) -> MP4."""
     cmd = ["gst-launch-1.0", "-q", "-e",
@@ -1194,9 +1236,17 @@ class App:
 
     # -- target selection --------------------------------------------------
 
-    def grab_screen(self, interactive=False):
-        """Whole-desktop pixbuf, or None (after notifying / reopening) on failure."""
+    def grab_screen(self, interactive=False, rect=None):
+        """Whole-desktop pixbuf (at least the monitors under `rect` when given), or None
+        (after notifying / reopening) on failure."""
         try:
+            if rect is not None:
+                try:
+                    shot = silent_grab(rect)
+                    if shot is not None:
+                        return shot
+                except (GLib.Error, KeyError, IndexError, OSError, subprocess.SubprocessError) as exc:
+                    print(f"screencast grab failed, using the screenshot portal: {exc}", file=sys.stderr)
             return portal_screenshot(interactive)
         except PortalCancelled:
             pass
@@ -1221,13 +1271,13 @@ class App:
                 shot = self.grab_screen(interactive=True)
                 rect = shot and (0, 0, shot.get_width(), shot.get_height())
             else:
-                shot = self.grab_screen()
+                if target == "all":
+                    rect = (0, 0, *root_size())
+                elif target == "screen":
+                    rect = pointer_monitor_rect()
+                shot = self.grab_screen(rect=rect)
             if shot is None:
                 return False
-            if target == "all":
-                rect = (0, 0, shot.get_width(), shot.get_height())
-            elif target == "screen":
-                rect = pointer_monitor_rect()
             self.save_shot(clamp_rect(rect, shot.get_width(), shot.get_height()), shot,
                            output, clipboard, preview)
             return False
@@ -1554,7 +1604,7 @@ class CaptureDialog(Gtk.Window):
 
     BOTTOM_MARGIN = 80
 
-    def __init__(self, app, video=False, target="screen", pointer=False, delay=0, audio=False):
+    def __init__(self, app, video=False, target="area", pointer=False, delay=0, audio=False):
         super().__init__(title=APP_NAME)
         self.app = app
         self.set_resizable(False)
