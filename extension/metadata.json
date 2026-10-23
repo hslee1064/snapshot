@@ -1,0 +1,6 @@
+{
+  "uuid": "snapshot@hyunsik1-lee",
+  "name": "Snapshot window list",
+  "description": "Lets the Snapshot app see where windows are, so you can pick one by hovering over it.",
+  "shell-version": ["45", "46", "47", "48", "49", "50"]
+}

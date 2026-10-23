@@ -26,6 +26,13 @@ install -Dm644 snapshot.svg "$HOME/.local/share/icons/hicolor/scalable/apps/snap
 gtk-update-icon-cache -q -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
 install -Dm644 snapshot.desktop "$HOME/.local/share/applications/snapshot.desktop"
 update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+# Shell extension for hover-picking windows; GNOME loads new extensions after the next login.
+EXT="$HOME/.local/share/gnome-shell/extensions/snapshot@hyunsik1-lee"
+install -Dm644 extension/metadata.json "$EXT/metadata.json"
+install -Dm644 extension/extension.js "$EXT/extension.js"
+gnome-extensions enable snapshot@hyunsik1-lee 2>/dev/null \
+  || gsettings set org.gnome.shell enabled-extensions \
+       "$(gsettings get org.gnome.shell enabled-extensions | python3 -c 'import ast,sys; l=ast.literal_eval(sys.stdin.read().replace("@as ","")); u="snapshot@hyunsik1-lee"; print(l if u in l else l+[u])')"
 echo "Installed: ~/.local/bin/snapshot"
 
 if [[ "${WANT_SHORTCUTS:-}" == 1 ]]; then

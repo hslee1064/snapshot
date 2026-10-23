@@ -351,6 +351,24 @@ def screencast_frame(key, position):
         cast.close()
 
 
+def list_windows():
+    """[(x, y, w, h) in physical root pixels, title], topmost first, from the bundled
+    GNOME Shell extension; None when it isn't running (e.g. before re-login)."""
+    try:
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        ret = bus.call_sync("org.gnome.Shell", "/org/gnome/Shell/Extensions/Snapshot",
+                            "org.gnome.Shell.Extensions.Snapshot", "GetWindows", None,
+                            GLib.VariantType("(s)"), Gio.DBusCallFlags.NONE, 2000, None)
+    except GLib.Error:
+        return None
+    data = json.loads(ret.unpack()[0])
+    # Stage coordinates are logical; map them onto the root window's physical pixels.
+    width, height = root_size()
+    sx, sy = width / data["stage"][0], height / data["stage"][1]
+    return [((round(x * sx), round(y * sy), round(w * sx), round(h * sy)), win["title"])
+            for win in data["windows"] for x, y, w, h in [win["rect"]]]
+
+
 def window_frame():
     """One frame of the application window the user picks in the portal's window list."""
     cast = ScreenCast()
@@ -423,16 +441,20 @@ class SelectionOverlay(Gtk.Window):
 
     The screen is only grabbed after the pick: every portal grab flashes the screen.
 
+    With `windows` ([(physical rect, title)], topmost first) it picks a window instead:
+    the one under the pointer is highlighted and a click takes it.
+
     Calls on_done(rect) with a physical-pixel rect, or on_done(None) when cancelled.
     """
 
-    def __init__(self, on_done):
+    def __init__(self, on_done, windows=None):
         super().__init__(type=Gtk.WindowType.POPUP)
         self.on_done = on_done
         self.scale = scale_factor()
         self.start = None
         self.current = None
         self.finished = False
+        self.windows = windows
 
         w, h = root_size()
         self.move(0, 0)
@@ -474,7 +496,18 @@ class SelectionOverlay(Gtk.Window):
 
     # -- geometry ----------------------------------------------------------
 
+    def hovered_window(self):
+        x, y = (v * self.scale for v in self.pointer_pos())
+        for rect, title in self.windows:
+            rx, ry, rw, rh = rect
+            if rx <= x < rx + rw and ry <= y < ry + rh:
+                return rect, title
+        return None
+
     def selection_logical(self):
+        if self.windows is not None:
+            hit = self.hovered_window()
+            return hit and tuple(v / self.scale for v in hit[0])
         if self.start is None or self.current is None:
             return None
         (x1, y1), (x2, y2) = self.start, self.current
@@ -507,9 +540,12 @@ class SelectionOverlay(Gtk.Window):
             cr.rectangle(x + 1, y + 1, max(w - 2, 0), max(h - 2, 0))
             cr.stroke()
             label = f"{int(w * self.scale)} × {int(h * self.scale)}"
-            self.draw_label(cr, label, x, y + h + 8, height)
+            if self.windows is not None:
+                label = f"{self.hovered_window()[1]}  ·  {label}"
+            self.draw_label(cr, label, max(x, 0), max(y, 0) + 8 if y + h + 40 > height else y + h + 8, height)
         else:
-            hint = "드래그해서 영역을 선택하세요 · Esc 취소"
+            hint = ("창 위에서 클릭해서 선택하세요" if self.windows is not None
+                    else "드래그해서 영역을 선택하세요") + " · Esc 취소"
             x, y = self.pointer_pos()
             self.draw_label(cr, hint, x + 16, y + 16, height)
 
@@ -532,6 +568,10 @@ class SelectionOverlay(Gtk.Window):
     def on_press(self, widget, event):
         if event.button == 3:
             self.finish(None)
+        elif event.button == 1 and self.windows is not None:
+            hit = self.hovered_window()
+            if hit:
+                self.finish(hit[0])
         elif event.button == 1:
             self.start = self.current = (event.x, event.y)
         return True
@@ -543,7 +583,7 @@ class SelectionOverlay(Gtk.Window):
         return True
 
     def on_release(self, widget, event):
-        if event.button != 1 or self.start is None:
+        if event.button != 1 or self.start is None or self.windows is not None:
             return True
         self.current = (event.x, event.y)
         x, y, w, h = self.selection_logical()
@@ -1299,8 +1339,8 @@ class App:
 
     def screenshot(self, target, delay=0, output=None, clipboard=True, preview=True):
         def capture(rect=None):
-            if target == "window":
-                # Windows can't be listed on Wayland; the ScreenCast portal's window list picks one.
+            if target == "window" and rect is None:
+                # Extension missing: the ScreenCast portal's window list picks one.
                 shot = self.grab_window()
                 rect = shot and (0, 0, shot.get_width(), shot.get_height())
             else:
@@ -1321,8 +1361,9 @@ class App:
             else:
                 countdown(delay, lambda: capture(rect), rect)
 
-        if target == "area":
-            GLib.timeout_add(1, lambda: (self.select_area(chosen), False)[1])
+        windows = list_windows() if target == "window" else None
+        if target == "area" or windows:
+            GLib.timeout_add(1, lambda: (SelectionOverlay(chosen, windows).present_and_grab(), False)[1])
         else:
             countdown(delay, capture)
 
