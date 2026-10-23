@@ -621,7 +621,6 @@ class SelectionOverlay(Gtk.Window):
         w, h = root_size()
         if rect is not None:
             rect = clamp_rect(rect, w, h)
-        # Let the overlay unmap before anything captures the screen again.
         # Let the overlay unmap (and a raised window repaint) before anything captures the screen.
         GLib.timeout_add(300 if self.windows else 150, lambda: (self.on_done(rect), False)[1])
 
