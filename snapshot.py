@@ -325,23 +325,40 @@ class ScreenCast:
             self.session = None
 
 
-def screencast_frame(key, position):
-    """One frame of a monitor via a ScreenCast session; unlike the Screenshot portal it
-    doesn't flash. Returns None if the session isn't for the monitor at `position`."""
-    cast = ScreenCast()
-    cast.start(False, False, key)
+def cast_frame(cast):
+    """One PNG frame from a started ScreenCast session, as an opaque pixbuf."""
     fd, tmp = tempfile.mkstemp(prefix="snapshot-", suffix=".png")
     os.close(fd)
     try:
-        if tuple(cast.props.get("position", (0, 0))) != position:
-            return None
         subprocess.run(["gst-launch-1.0", "-q", "pipewiresrc", f"fd={cast.fd}", f"path={cast.node}", "!",
                         "videoconvert", "!", "pngenc", "snapshot=true", "!", "filesink", f"location={tmp}"],
                        pass_fds=(cast.fd,), stdin=subprocess.DEVNULL, timeout=5, check=True)
         return without_alpha(GdkPixbuf.Pixbuf.new_from_file(tmp))
     finally:
-        cast.close()
         os.unlink(tmp)
+
+
+def screencast_frame(key, position):
+    """One frame of a monitor via a ScreenCast session; unlike the Screenshot portal it
+    doesn't flash. Returns None if the session isn't for the monitor at `position`."""
+    cast = ScreenCast()
+    cast.start(False, False, key)
+    try:
+        if tuple(cast.props.get("position", (0, 0))) != position:
+            return None
+        return cast_frame(cast)
+    finally:
+        cast.close()
+
+
+def window_frame():
+    """One frame of the application window the user picks in the portal's window list."""
+    cast = ScreenCast()
+    cast.start(True, False)
+    try:
+        return cast_frame(cast)
+    finally:
+        cast.close()
 
 
 def silent_grab(rect):
@@ -1258,6 +1275,21 @@ class App:
             self.quit(1)
         return None
 
+    def grab_window(self):
+        """Pixbuf of a window picked from the portal's list, or None (after notifying /
+        reopening) on failure or cancel."""
+        try:
+            return window_frame()
+        except PortalCancelled:
+            pass
+        except (GLib.Error, KeyError, IndexError, OSError, subprocess.SubprocessError) as exc:
+            notify(APP_NAME, f"창을 캡처하지 못했습니다: {exc}", "dialog-error")
+        if self.dialog_settings:
+            self.show_dialog()
+        else:
+            self.quit(1)
+        return None
+
     def select_area(self, callback):
         """Let the user drag out an area on the live screen, then callback(rect or None)."""
         SelectionOverlay(callback).present_and_grab()
@@ -1267,8 +1299,8 @@ class App:
     def screenshot(self, target, delay=0, output=None, clipboard=True, preview=True):
         def capture(rect=None):
             if target == "window":
-                # Windows can't be listed on Wayland; GNOME's own picker hands back the window.
-                shot = self.grab_screen(interactive=True)
+                # Windows can't be listed on Wayland; the ScreenCast portal's window list picks one.
+                shot = self.grab_window()
                 rect = shot and (0, 0, shot.get_width(), shot.get_height())
             else:
                 if target == "all":
