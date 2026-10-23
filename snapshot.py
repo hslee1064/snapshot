@@ -352,7 +352,7 @@ def screencast_frame(key, position):
 
 
 def list_windows():
-    """[(x, y, w, h) in physical root pixels, title], topmost first, from the bundled
+    """[(x, y, w, h) in physical root pixels, title, id], topmost first, from the bundled
     GNOME Shell extension; None when it isn't running (e.g. before re-login)."""
     try:
         bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
@@ -365,8 +365,18 @@ def list_windows():
     # Stage coordinates are logical; map them onto the root window's physical pixels.
     width, height = root_size()
     sx, sy = width / data["stage"][0], height / data["stage"][1]
-    return [((round(x * sx), round(y * sy), round(w * sx), round(h * sy)), win["title"])
+    return [((round(x * sx), round(y * sy), round(w * sx), round(h * sy)), win["title"], win["id"])
             for win in data["windows"] for x, y, w, h in [win["rect"]]]
+
+
+def raise_window(win_id):
+    """Bring a listed window to the front (best effort)."""
+    try:
+        Gio.bus_get_sync(Gio.BusType.SESSION, None).call_sync(
+            "org.gnome.Shell", "/org/gnome/Shell/Extensions/Snapshot", "org.gnome.Shell.Extensions.Snapshot",
+            "Raise", GLib.Variant("(t)", (win_id,)), None, Gio.DBusCallFlags.NONE, 2000, None)
+    except GLib.Error:
+        pass
 
 
 def window_frame():
@@ -498,10 +508,10 @@ class SelectionOverlay(Gtk.Window):
 
     def hovered_window(self):
         x, y = (v * self.scale for v in self.pointer_pos())
-        for rect, title in self.windows:
-            rx, ry, rw, rh = rect
+        for win in self.windows:
+            rx, ry, rw, rh = win[0]
             if rx <= x < rx + rw and ry <= y < ry + rh:
-                return rect, title
+                return win
         return None
 
     def selection_logical(self):
@@ -571,6 +581,8 @@ class SelectionOverlay(Gtk.Window):
         elif event.button == 1 and self.windows is not None:
             hit = self.hovered_window()
             if hit:
+                # Raise it so windows in front don't end up in the capture.
+                raise_window(hit[2])
                 self.finish(hit[0])
         elif event.button == 1:
             self.start = self.current = (event.x, event.y)
@@ -610,7 +622,8 @@ class SelectionOverlay(Gtk.Window):
         if rect is not None:
             rect = clamp_rect(rect, w, h)
         # Let the overlay unmap before anything captures the screen again.
-        GLib.timeout_add(150, lambda: (self.on_done(rect), False)[1])
+        # Let the overlay unmap (and a raised window repaint) before anything captures the screen.
+        GLib.timeout_add(300 if self.windows else 150, lambda: (self.on_done(rect), False)[1])
 
 
 # ---------------------------------------------------------------------------
