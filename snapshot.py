@@ -655,6 +655,7 @@ class PreviewWindow(Gtk.Window):
         self.saved = path
         print(path, flush=True)
         notify_saved("스크린샷을 저장했습니다", path, "camera-photo")
+        self.header.set_subtitle(f"{self.size_text}  ·  저장됨: {os.path.basename(path)}")
         if close:
             self.destroy()
 
@@ -669,7 +670,7 @@ class PreviewWindow(Gtk.Window):
             dialog.destroy()
             if not path.lower().endswith(".png"):
                 path += ".png"
-            self.save(path, close=True)
+            self.save(path, close=False)
         else:
             dialog.destroy()
 
@@ -1183,9 +1184,9 @@ class VideoPreviewWindow(Gtk.Window):
         if path.lower().endswith(".gif"):
             self.convert_gif(path)
             return
-        self.player.set_state(self.Gst.State.NULL)
+        # Copy, not move: the preview keeps playing the temp file and can be saved again.
         try:
-            shutil.move(self.temp_path, path)
+            shutil.copyfile(self.temp_path, path)
         except OSError as exc:
             self.header.set_subtitle(f"저장 실패: {exc}")
             return
@@ -1211,16 +1212,16 @@ class VideoPreviewWindow(Gtk.Window):
         self.saved = True
         print(path, flush=True)
         notify_saved("화면 녹화를 저장했습니다", path, "video-x-generic")
-        self.destroy()
+        self.save_btn.set_sensitive(True)
+        self.header.set_subtitle(f"저장됨: {os.path.basename(path)}")
 
     def on_destroy(self, *_):
         GLib.source_remove(self.progress_timer)
         self.player.set_state(self.Gst.State.NULL)
-        if not self.saved:
-            try:
-                os.unlink(self.temp_path)
-            except OSError:
-                pass
+        try:
+            os.unlink(self.temp_path)
+        except OSError:
+            pass
         self.on_close()
 
 
