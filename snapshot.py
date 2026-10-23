@@ -365,7 +365,7 @@ def list_windows():
     # Stage coordinates are logical; map them onto the root window's physical pixels.
     width, height = root_size()
     sx, sy = width / data["stage"][0], height / data["stage"][1]
-    return [((round(x * sx), round(y * sy), round(w * sx), round(h * sy)), win["title"], win["id"])
+    return [((round(x * sx), round(y * sy), round(w * sx), round(h * sy)), win["title"], win.get("id"))
             for win in data["windows"] for x, y, w, h in [win["rect"]]]
 
 
@@ -582,7 +582,8 @@ class SelectionOverlay(Gtk.Window):
             hit = self.hovered_window()
             if hit:
                 # Raise it so windows in front don't end up in the capture.
-                raise_window(hit[2])
+                if hit[2] is not None:  # older extensions (until re-login) can't raise
+                    raise_window(hit[2])
                 self.finish(hit[0])
         elif event.button == 1:
             self.start = self.current = (event.x, event.y)
