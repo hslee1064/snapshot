@@ -1691,7 +1691,7 @@ class CaptureDialog(Gtk.Window):
 
     BOTTOM_MARGIN = 80
 
-    def __init__(self, app, video=False, target="area", pointer=False, delay=0, audio=False):
+    def __init__(self, app, video=False, target="area", pointer=True, delay=0, audio=False):
         super().__init__(title=APP_NAME)
         self.app = app
         self.set_resizable(False)
