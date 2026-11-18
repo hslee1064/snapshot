@@ -1958,6 +1958,28 @@ def parse_args(argv):
     return p.parse_args(argv)
 
 
+def launched_twice(window=1.0):
+    """True when another `ui` started moments ago. Grabbing the keyboard for the area
+    picker makes gsd-media-keys fire the held shortcut a second time."""
+    import fcntl
+    import time
+    path = os.path.join(RUNTIME_DIR, "snapshot-ui.stamp")
+    with open(path, "a+") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.seek(0)
+        try:
+            last = float(f.read() or 0)
+        except ValueError:
+            last = 0
+        now = time.monotonic()
+        if 0 <= now - last < window:
+            return True
+        f.seek(0)
+        f.truncate()
+        f.write(str(now))
+    return False
+
+
 def detach(argv):
     """Run the capture in a new process so the shell gets control back once the file
     is saved, while the child keeps the preview and clipboard alive. (A plain fork
@@ -1993,6 +2015,8 @@ def main(argv=None):
 
     if not check_session():
         return 1
+    if cmd == "ui" and launched_twice():
+        return 0
     report_fd = None
     if cmd == "shot":
         if "SNAPSHOT_REPORT_FD" not in os.environ:
