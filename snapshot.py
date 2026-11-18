@@ -2001,8 +2001,12 @@ def main(argv=None):
     Notify.init(APP_NAME)
     app = App(report_fd)
 
-    if cmd == "ui":
-        app.show_dialog(video=getattr(args, "video", False))
+    if cmd == "ui" and getattr(args, "video", False):
+        app.show_dialog(video=True)
+    elif cmd == "ui":
+        # Start straight in the area picker; Esc there falls back to the dialog.
+        app.dialog_settings = {"target": "area", "video": False}
+        app.screenshot("area")
     elif cmd == "shot":
         app.screenshot(args.target, delay=args.delay,
                        output=args.output, clipboard=not args.no_clipboard,
