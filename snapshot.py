@@ -1905,6 +1905,9 @@ class CaptureDialog(Gtk.Window):
         self.app.pending.discard("dialog")
         self.app.dialog_settings = {"target": target, "pointer": pointer, "delay": delay,
                                     "video": video, "audio": audio}
+        # Losing focus while being destroyed must not count as dismissing the dialog,
+        # or the settings (and the way back to it on Esc) would be dropped.
+        self.had_focus = False
         self.destroy()
 
         # Wait for the dialog to disappear from the screen before grabbing.
